@@ -585,12 +585,28 @@ def enrich_data(bootstrap, fixtures, team_odds):
     players_raw = bootstrap["elements"]
     teams = {t["id"]: t for t in bootstrap["teams"]}
     events = bootstrap["events"]
-    current_gw = (
-        next((e for e in events if e["is_current"]), None) or
-        next((e for e in events if e["is_next"]), None) or
-        (events[0] if events else None)
-    )
-    gw_id = current_gw["id"] if current_gw else 1
+
+    # Determine the NEXT gameweek to plan for (transfers are for the future)
+    # Priority: is_next (upcoming), or if is_current is not finished yet use that,
+    # otherwise find the first unfinished GW
+    next_gw = next((e for e in events if e.get("is_next")), None)
+    current_gw_obj = next((e for e in events if e.get("is_current")), None)
+
+    if next_gw:
+        planning_gw = next_gw
+    elif current_gw_obj and not current_gw_obj.get("finished"):
+        planning_gw = current_gw_obj
+    else:
+        # All current GWs finished, find first unfinished
+        unfinished = [e for e in events if not e.get("finished")]
+        planning_gw = unfinished[0] if unfinished else (events[-1] if events else None)
+
+    # For display purposes, current_gw is the latest active/completed
+    current_gw = current_gw_obj or planning_gw
+
+    # Planning GW ID — this is what we use for fixture windows and xPts
+    planning_gw_id = planning_gw["id"] if planning_gw else 1
+    gw_id = planning_gw_id  # all fixture lookups use this
 
     # Build upcoming fixtures
     upcoming = {t_id: [] for t_id in teams}
@@ -665,13 +681,15 @@ def enrich_data(bootstrap, fixtures, team_odds):
 
     df = pd.DataFrame(rows)
 
-    # Build xPts model
+    # Build xPts model (uses planning_gw_id, so only future fixtures)
     xpts_map = build_xpts_model(df, team_odds, teams, fixtures, gw_id)
 
     # Add xPts columns
+    # xpts_next_gw = xPts for the specific next gameweek (planning_gw_id)
     df["xpts_next_gw"] = df["id"].map(
-        lambda pid: list(xpts_map.get(pid, {}).values())[0] if xpts_map.get(pid) else 0
+        lambda pid: xpts_map.get(pid, {}).get(planning_gw_id, 0)
     )
+    # xpts_total = sum of xPts over next 6 GWs (all from planning_gw_id onwards)
     df["xpts_total"] = df["id"].map(
         lambda pid: sum(xpts_map.get(pid, {}).values())
     )
@@ -686,7 +704,7 @@ def enrich_data(bootstrap, fixtures, team_odds):
         lambda r: round(r["xpts_total"] / max(r["price"], 1), 2), axis=1
     )
 
-    return df, teams, current_gw, upcoming, fixtures, xpts_map
+    return df, teams, current_gw, planning_gw_id, upcoming, fixtures, xpts_map
 
 
 # ============================================================
@@ -1033,7 +1051,7 @@ def main():
     team_odds = odds_to_probabilities(odds_df, TEAM_NAME_MAP) if odds_df is not None else {}
 
     with st.spinner("Building xPts model & enriching data..."):
-        df, teams, current_gw, upcoming_map, fixtures_list, xpts_map = enrich_data(
+        df, teams, current_gw, planning_gw_id, upcoming_map, fixtures_list, xpts_map = enrich_data(
             bootstrap, fixtures_raw, team_odds
         )
 
@@ -1042,10 +1060,12 @@ def main():
         deadline = datetime.fromisoformat(current_gw["deadline_time"].replace("Z", "+00:00"))
         status = "Completed" if current_gw.get("finished") else ("In Progress" if current_gw.get("is_current") else "Upcoming")
         bc = "badge-green" if status == "Completed" else ("badge-yellow" if status == "In Progress" else "badge-blue")
+        planning_str = f"Planning for GW{planning_gw_id}" if planning_gw_id != current_gw.get("id") else ""
         st.markdown(f"""<div class="gw-bar">
             <span class="gw-num">Gameweek {current_gw['id']}</span>
             <span class="gw-deadline">Deadline: {deadline.strftime('%a %d %b, %H:%M')}</span>
             <span class="badge {bc}">{status}</span>
+            {f'<span class="badge badge-blue">{planning_str}</span>' if planning_str else ''}
             <span style="color:#5a6580; font-size:0.7rem;">Odds: {odds_status} · {len(team_odds)} teams matched</span>
         </div>""", unsafe_allow_html=True)
 
@@ -1547,8 +1567,7 @@ def main():
     # ==================== FIXTURES ====================
     with tab6:
         st.markdown('<div class="section-header">Fixture Difficulty — Next 6 Gameweeks <span class="source-tag src-odds">Odds-enhanced</span></div>', unsafe_allow_html=True)
-        gw_id = current_gw["id"] if current_gw else 1
-        gw_range = list(range(gw_id, gw_id + 6))
+        gw_range = list(range(planning_gw_id, planning_gw_id + 6))
 
         fm = {t_id: {} for t_id in teams}
         for f in fixtures_list:
