@@ -1047,12 +1047,17 @@ def solve_best_xi_for_gw(squad_df, xpts_map, gw_id):
 
 def find_best_single_transfer_for_gw(squad_df, all_players_df, bank,
                                       purchase_prices, selling_prices_api,
-                                      xpts_map, gw_id):
-    """Find the single best transfer specifically for one gameweek's xPts."""
+                                      xpts_map, gw_id, exclude_ids=None):
+    """Find the single best transfer specifically for one gameweek's xPts.
+    exclude_ids: set of player IDs to exclude from candidates (e.g. just sold)
+    """
     if squad_df is None or len(squad_df) == 0:
         return None
 
-    squad_ids = set(squad_df["id"].tolist())
+    if exclude_ids is None:
+        exclude_ids = set()
+
+    squad_ids = set(squad_df["id"].tolist()) | exclude_ids
     available = all_players_df[
         (~all_players_df["id"].isin(squad_ids)) &
         (all_players_df["minutes"] > 45) &
@@ -1070,7 +1075,7 @@ def find_best_single_transfer_for_gw(squad_df, all_players_df, bank,
     )
 
     best = None
-    best_gain = 0
+    best_gain = -999  # allow any positive gain
 
     for _, out_p in squad_df.iterrows():
         budget_avail = bank + out_p["sell_price"]
@@ -1079,8 +1084,7 @@ def find_best_single_transfer_for_gw(squad_df, all_players_df, bank,
 
         cands = available[
             (available["pos_id"] == out_p["pos_id"]) &
-            (available["now_cost"] <= budget_avail) &
-            (available["xpts_gw"] > out_p["xpts_gw"])
+            (available["now_cost"] <= budget_avail)
         ]
         cands = cands[cands["team_id"].map(lambda tid: tc.get(tid, 0) < 3)]
 
@@ -1089,7 +1093,7 @@ def find_best_single_transfer_for_gw(squad_df, all_players_df, bank,
 
         top = cands.loc[cands["xpts_gw"].idxmax()]
         gain = top["xpts_gw"] - out_p["xpts_gw"]
-        if gain > best_gain:
+        if gain > best_gain and gain > 0.05:  # very low threshold — let the caller decide
             best_gain = gain
             best = {
                 "out": out_p.to_dict(),
@@ -1270,36 +1274,41 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
         transfers_made = []
         transfers_ft_used = 0
         total_hit = 0
+        recently_sold = set()  # track sold players so we don't suggest buying them back
 
         # Keep finding improving transfers until no more gains
-        max_transfers = min(current_ft + 3, 5)  # allow up to 3 hits beyond FTs
+        max_transfers = min(current_ft + 3, 8)  # allow up to 3 hits beyond FTs, cap at 8
         for t_num in range(max_transfers):
             transfer = find_best_single_transfer_for_gw(
                 current_squad, all_players_df, current_bank,
-                current_purchase, current_selling, xpts_map, gw
+                current_purchase, current_selling, xpts_map, gw,
+                exclude_ids=recently_sold,
             )
 
-            if transfer is None or transfer["xpts_gain"] < 0.3:
-                break  # no more improving transfers
+            if transfer is None:
+                break  # no improving transfer found
 
             # Is this a free transfer or a hit?
             is_free = (t_num < current_ft)
             hit_cost = 0 if is_free else 4
-            net_gain = transfer["xpts_gain"] - hit_cost
 
-            # For free transfers: always make if gain > 0.3
-            # For hits: only make if gain clearly exceeds the 4pt cost
-            if is_free and transfer["xpts_gain"] > 0.3:
-                pass  # proceed
-            elif not is_free and net_gain > 0.5:
-                total_hit += hit_cost
+            # Decision thresholds:
+            # Free transfers: make if ANY positive gain (even 0.1 xPts — it's free!)
+            # Hits: only make if gain clearly exceeds 4pt cost
+            if is_free:
+                if transfer["xpts_gain"] < 0.05:
+                    break  # negligible gain, not worth the effort
             else:
-                break  # not worth it
+                net_gain = transfer["xpts_gain"] - hit_cost
+                if net_gain < 0.5:
+                    break  # hit not worth it
+                total_hit += hit_cost
 
             # Apply transfer
             transfers_made.append(transfer)
             out_id = transfer["out"]["id"]
             in_id = transfer["in"]["id"]
+            recently_sold.add(out_id)  # don't suggest buying back
             current_squad = current_squad[current_squad["id"] != out_id]
             in_player = all_players_df[all_players_df["id"] == in_id]
             if len(in_player) > 0:
