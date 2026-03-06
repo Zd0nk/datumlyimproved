@@ -690,8 +690,295 @@ def enrich_data(bootstrap, fixtures, team_odds):
 
 
 # ============================================================
-# UI HELPERS
+# MANAGER TEAM FETCHER
 # ============================================================
+
+@st.cache_data(ttl=1800)
+def fetch_manager_team(manager_id, current_gw_id):
+    """
+    Fetch a manager's current squad, bank, free transfers,
+    and purchase prices (for correct selling price calculation).
+    """
+    try:
+        headers = {"User-Agent": "FPL-Optimizer/2.0"}
+
+        # 1. Basic manager info
+        entry = requests.get(
+            f"{FPL_BASE}/entry/{manager_id}/",
+            headers=headers, timeout=15,
+        ).json()
+
+        manager_name = f"{entry.get('player_first_name', '')} {entry.get('player_last_name', '')}"
+        team_name = entry.get("name", "Unknown")
+        overall_rank = entry.get("summary_overall_rank") or "-"
+        total_points = entry.get("summary_overall_points", 0)
+
+        # 2. History endpoint — gives bank and transfer count per GW
+        history = requests.get(
+            f"{FPL_BASE}/entry/{manager_id}/history/",
+            headers=headers, timeout=15,
+        ).json()
+
+        current_hist = history.get("current", [])
+        bank = 0
+        free_transfers = 1  # default
+
+        if current_hist:
+            latest_gw = current_hist[-1]
+            bank = latest_gw.get("bank", 0)
+
+            # Calculate free transfers available for NEXT gameweek
+            # Logic: start with 1 FT per GW, can bank up to max 5
+            # We look at the last few GWs to count how many were banked
+            ft = 1  # everyone gets 1 at start of season
+            for gw_data in current_hist:
+                transfers_made = gw_data.get("event_transfers", 0)
+                transfers_cost = gw_data.get("event_transfers_cost", 0)
+
+                if transfers_cost > 0:
+                    # They took hits: they used all FTs + some extra
+                    ft = 1  # reset to 1 for next GW (used everything + more)
+                elif transfers_made == 0:
+                    # Banked a FT
+                    ft = min(ft + 1, 5)
+                elif transfers_made <= ft:
+                    # Used some/all FTs without a hit
+                    ft = max(1, ft - transfers_made + 1)  # +1 for the new GW's FT
+                else:
+                    ft = 1
+
+            free_transfers = ft
+
+        # 3. Transfer history — gives purchase prices (element_in_cost)
+        transfers = requests.get(
+            f"{FPL_BASE}/entry/{manager_id}/transfers/",
+            headers=headers, timeout=15,
+        ).json()
+
+        # Build purchase price map: player_id -> purchase_price (in 0.1m units)
+        # Latest transfer for each player is their purchase price
+        purchase_prices = {}
+        for t in transfers:
+            purchase_prices[t["element_in"]] = t["element_in_cost"]
+
+        # 4. Current picks
+        picks_data = None
+        for gw in [current_gw_id, current_gw_id - 1]:
+            if gw < 1:
+                continue
+            try:
+                resp = requests.get(
+                    f"{FPL_BASE}/entry/{manager_id}/event/{gw}/picks/",
+                    headers=headers, timeout=15,
+                )
+                if resp.status_code == 200:
+                    picks_data = resp.json()
+                    break
+            except Exception:
+                continue
+
+        if picks_data is None:
+            return None, "Could not fetch team picks"
+
+        picks = picks_data.get("picks", [])
+        active_chip = picks_data.get("active_chip")
+
+        # entry_history within picks gives exact FT info in some API versions
+        entry_hist = picks_data.get("entry_history", {})
+        if entry_hist:
+            bank = entry_hist.get("bank", bank)
+
+        squad_ids = [p["element"] for p in picks]
+        captains = {p["element"]: p.get("is_captain", False) for p in picks}
+        vice_captains = {p["element"]: p.get("is_vice_captain", False) for p in picks}
+        positions_in_team = {p["element"]: p.get("position", 0) for p in picks}
+
+        # picks may contain selling_price in newer API
+        selling_prices_api = {}
+        for p in picks:
+            if "selling_price" in p:
+                selling_prices_api[p["element"]] = p["selling_price"]
+
+        return {
+            "manager_name": manager_name.strip(),
+            "team_name": team_name,
+            "overall_rank": overall_rank,
+            "total_points": total_points,
+            "bank": bank,
+            "free_transfers": free_transfers,
+            "squad_ids": squad_ids,
+            "captains": captains,
+            "vice_captains": vice_captains,
+            "positions": positions_in_team,
+            "active_chip": active_chip,
+            "purchase_prices": purchase_prices,
+            "selling_prices_api": selling_prices_api,
+        }, None
+
+    except requests.exceptions.HTTPError:
+        return None, "Manager ID not found"
+    except Exception as e:
+        return None, str(e)
+
+
+def calculate_selling_price(player_id, current_price, purchase_prices, selling_prices_api):
+    """
+    Calculate the correct FPL selling price.
+    Rule: you get 50% of profit (rounded down).
+    selling_price = purchase_price + floor((current_price - purchase_price) / 2)
+    If current_price < purchase_price, selling_price = current_price (full loss).
+    """
+    # If the API gave us the selling price directly, use it
+    if player_id in selling_prices_api:
+        return selling_prices_api[player_id]
+
+    purchase = purchase_prices.get(player_id, current_price)
+    if current_price <= purchase:
+        return current_price  # no profit or a loss — sell at current
+    profit = current_price - purchase
+    return purchase + (profit // 2)  # 50% of profit, rounded down
+
+
+def find_optimal_transfers(squad_df, all_players_df, bank, free_transfers,
+                           purchase_prices, selling_prices_api,
+                           n_transfers=1, xpts_col="xpts_total",
+                           hit_cost=4):
+    """
+    Find the best transfers using correct sale/buy prices and hit-aware logic.
+
+    For each candidate transfer:
+    - OUT player sold at their SELLING price (50% profit rule)
+    - IN player bought at current market price (now_cost)
+    - If n_transfers > free_transfers, apply -4 per extra transfer
+    - Only suggest if net xPts gain > hit penalty
+    """
+    if squad_df is None or len(squad_df) == 0:
+        return []
+
+    squad_ids = set(squad_df["id"].tolist())
+
+    # Available players not in squad
+    available = all_players_df[
+        (~all_players_df["id"].isin(squad_ids)) &
+        (all_players_df["minutes"] > 45) &
+        (all_players_df["status"].isin(["a", "d", ""])) &
+        (all_players_df[xpts_col] > 0)
+    ].copy()
+
+    # Calculate selling price for each squad player
+    squad_df = squad_df.copy()
+    squad_df["sell_price"] = squad_df.apply(
+        lambda r: calculate_selling_price(
+            r["id"], r["now_cost"], purchase_prices, selling_prices_api
+        ), axis=1
+    )
+
+    # Hit penalty: transfers beyond free ones cost 4 pts each
+    extra_transfers = max(0, n_transfers - free_transfers)
+    total_hit = extra_transfers * hit_cost
+
+    suggestions = []
+
+    if n_transfers == 1:
+        for _, out_p in squad_df.iterrows():
+            # Budget available = bank + selling price of outgoing player
+            budget_available = bank + out_p["sell_price"]
+            remaining_squad = squad_df[squad_df["id"] != out_p["id"]]
+            team_counts = remaining_squad["team_id"].value_counts().to_dict()
+
+            cands = available[
+                (available["pos_id"] == out_p["pos_id"]) &
+                (available["now_cost"] <= budget_available)
+            ].copy()
+            cands = cands[cands["team_id"].map(lambda tid: team_counts.get(tid, 0) < 3)]
+
+            if len(cands) == 0:
+                continue
+
+            best_in = cands.loc[cands[xpts_col].idxmax()]
+            xpts_gain = best_in[xpts_col] - out_p[xpts_col]
+            net_gain = xpts_gain - total_hit
+
+            if net_gain > 0.5:  # only suggest if meaningfully better
+                suggestions.append({
+                    "out": [out_p.to_dict()],
+                    "in": [best_in.to_dict()],
+                    "xpts_gain": round(xpts_gain, 1),
+                    "net_gain": round(net_gain, 1),
+                    "hit": total_hit,
+                    "cost_change": round((best_in["now_cost"] - out_p["sell_price"]) / 10, 1),
+                    "budget_after": round((budget_available - best_in["now_cost"]) / 10, 1),
+                })
+
+    elif n_transfers >= 2:
+        squad_list = squad_df.to_dict("records")
+        seen = set()
+        for i, out1 in enumerate(squad_list):
+            for j, out2 in enumerate(squad_list):
+                if j <= i:
+                    continue
+                pair_key = (min(out1["id"], out2["id"]), max(out1["id"], out2["id"]))
+                if pair_key in seen:
+                    continue
+                seen.add(pair_key)
+
+                freed = bank + out1["sell_price"] + out2["sell_price"]
+                remaining = squad_df[~squad_df["id"].isin([out1["id"], out2["id"]])]
+                tc = remaining["team_id"].value_counts().to_dict()
+
+                best_pair_xpts = 0
+                best_pair = None
+
+                cands1 = available[
+                    (available["pos_id"] == out1["pos_id"]) &
+                    (available["now_cost"] <= freed)
+                ]
+                cands1 = cands1[cands1["team_id"].map(lambda t: tc.get(t, 0) < 3)]
+
+                for _, in1 in cands1.nlargest(5, xpts_col).iterrows():
+                    remaining_budget = freed - in1["now_cost"]
+                    tc2 = tc.copy()
+                    tc2[in1["team_id"]] = tc2.get(in1["team_id"], 0) + 1
+
+                    cands2 = available[
+                        (available["pos_id"] == out2["pos_id"]) &
+                        (available["now_cost"] <= remaining_budget) &
+                        (available["id"] != in1["id"])
+                    ]
+                    cands2 = cands2[cands2["team_id"].map(lambda t: tc2.get(t, 0) < 3)]
+
+                    if len(cands2) == 0:
+                        continue
+
+                    in2 = cands2.loc[cands2[xpts_col].idxmax()]
+                    pair_xpts = in1[xpts_col] + in2[xpts_col]
+
+                    if pair_xpts > best_pair_xpts:
+                        best_pair_xpts = pair_xpts
+                        best_pair = (in1, in2)
+
+                if best_pair:
+                    old_xpts = out1[xpts_col] + out2[xpts_col]
+                    xpts_gain = best_pair_xpts - old_xpts
+                    net_gain = xpts_gain - total_hit
+
+                    if net_gain > 0.5:
+                        total_in_cost = best_pair[0]["now_cost"] + best_pair[1]["now_cost"]
+                        suggestions.append({
+                            "out": [out1, out2],
+                            "in": [best_pair[0].to_dict(), best_pair[1].to_dict()],
+                            "xpts_gain": round(xpts_gain, 1),
+                            "net_gain": round(net_gain, 1),
+                            "hit": total_hit,
+                            "cost_change": round((total_in_cost - out1["sell_price"] - out2["sell_price"]) / 10, 1),
+                            "budget_after": round((freed - total_in_cost) / 10, 1),
+                        })
+
+    suggestions.sort(key=lambda x: x["net_gain"], reverse=True)
+    return suggestions[:10]
+
+
+
 
 def get_formation_str(xi_df):
     """Get formation string like '4-4-2' from starting XI."""
@@ -763,16 +1050,280 @@ def main():
         </div>""", unsafe_allow_html=True)
 
     # === Tabs ===
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📊 Dashboard", "👥 Player Projections", "⭐ Optimal Squad (MILP)",
-        "🔄 Transfer Planner", "📅 Fixtures"
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "🏠 My Team", "📊 Dashboard", "👥 Player Projections",
+        "⭐ Optimal Squad (MILP)", "🔄 Transfer Planner", "📅 Fixtures"
     ])
 
     active = df[df["minutes"] > 0].copy()
     qualified = df[df["minutes"] > 45].copy()
 
-    # ==================== DASHBOARD ====================
+    # ==================== MY TEAM ====================
     with tab1:
+        st.markdown(
+            '<div class="section-header">🏠 My Team — Enter Your FPL ID</div>',
+            unsafe_allow_html=True,
+        )
+
+        # FPL ID input
+        col_id, col_btn = st.columns([3, 1])
+        with col_id:
+            fpl_id = st.text_input(
+                "FPL Team ID",
+                value=st.session_state.get("fpl_id", ""),
+                placeholder="e.g. 123456",
+                help="Find your ID in the URL when you view your team on the FPL website",
+                key="fpl_id_input",
+            )
+        with col_btn:
+            st.markdown("<br>", unsafe_allow_html=True)
+            load_team = st.button("Load My Team", use_container_width=True)
+
+        if load_team and fpl_id:
+            st.session_state["fpl_id"] = fpl_id
+
+        if fpl_id and fpl_id.strip().isdigit():
+            manager_id = int(fpl_id.strip())
+            gw_id = current_gw["id"] if current_gw else 1
+
+            with st.spinner("Fetching your team..."):
+                team_data, team_err = fetch_manager_team(manager_id, gw_id)
+
+            if team_err:
+                st.error(f"Could not load team: {team_err}")
+                st.info("Make sure your FPL ID is correct. You can find it in the URL when viewing your team on the FPL website.")
+            elif team_data:
+                # Manager info header
+                c1, c2, c3, c4 = st.columns(4)
+                with c1:
+                    st.markdown(f"""<div class="metric-card">
+                        <div class="metric-label">Manager</div>
+                        <div class="metric-value" style="font-size:1.1rem;">{team_data['team_name']}</div>
+                        <div class="metric-sub">{team_data['manager_name']}</div>
+                    </div>""", unsafe_allow_html=True)
+                with c2:
+                    st.markdown(f"""<div class="metric-card">
+                        <div class="metric-label">Overall Rank</div>
+                        <div class="metric-value">{team_data['overall_rank']:,}</div>
+                        <div class="metric-sub">{team_data['total_points']} pts</div>
+                    </div>""", unsafe_allow_html=True)
+                with c3:
+                    bank_display = team_data['bank'] / 10
+                    ft_display = team_data.get('free_transfers', 1)
+                    st.markdown(f"""<div class="metric-card">
+                        <div class="metric-label">Bank / Free Transfers</div>
+                        <div class="metric-value">£{bank_display:.1f}m</div>
+                        <div class="metric-sub">~{ft_display} FT available</div>
+                    </div>""", unsafe_allow_html=True)
+                with c4:
+                    squad_xpts = 0
+                    my_squad = df[df["id"].isin(team_data["squad_ids"])].copy()
+                    if len(my_squad) > 0:
+                        squad_xpts = my_squad["xpts_total"].sum()
+                    st.markdown(f"""<div class="metric-card">
+                        <div class="metric-label">Squad xPts (6GW)</div>
+                        <div class="metric-value">{squad_xpts:.1f}</div>
+                        <div class="metric-sub">{len(my_squad)} players loaded</div>
+                    </div>""", unsafe_allow_html=True)
+
+                st.markdown("")
+
+                if len(my_squad) > 0:
+                    # Mark starters vs bench
+                    my_squad["is_starter"] = my_squad["id"].map(
+                        lambda pid: team_data["positions"].get(pid, 99) <= 11
+                    )
+                    my_squad["is_captain"] = my_squad["id"].map(
+                        lambda pid: team_data["captains"].get(pid, False)
+                    )
+                    my_squad["is_vice"] = my_squad["id"].map(
+                        lambda pid: team_data["vice_captains"].get(pid, False)
+                    )
+
+                    # Show current squad
+                    st.subheader("Your Current Squad")
+                    starters = my_squad[my_squad["is_starter"]].sort_values(
+                        ["pos_id", "xpts_total"], ascending=[True, False]
+                    )
+                    bench = my_squad[~my_squad["is_starter"]].sort_values("pos_id")
+
+                    # Pitch view of starters
+                    for pid_val, plabel in [(4, "Forwards"), (3, "Midfielders"), (2, "Defenders"), (1, "Goalkeeper")]:
+                        pp = starters[starters["pos_id"] == pid_val]
+                        if len(pp) > 0:
+                            st.markdown(f"<div class='pitch-row-label'>{plabel}</div>", unsafe_allow_html=True)
+                            cols = st.columns(max(len(pp), 1))
+                            for i, (_, p) in enumerate(pp.iterrows()):
+                                sc = f"pitch-shirt-{p['pos'].lower()}"
+                                cap_badge = " (C)" if p["is_captain"] else (" (V)" if p["is_vice"] else "")
+                                with cols[i]:
+                                    st.markdown(f"""<div style="text-align:center;">
+                                        <div class="pitch-shirt {sc}">{p['xpts_next_gw']:.1f}</div>
+                                        <div class="pitch-name">{p['name']}{cap_badge}</div>
+                                        <div class="pitch-price">£{p['price']:.1f}m · {p['xpts_total']:.1f} xPts</div>
+                                    </div>""", unsafe_allow_html=True)
+
+                    if len(bench) > 0:
+                        st.markdown("**Bench**")
+                        bcols = st.columns(max(len(bench), 1))
+                        for i, (_, p) in enumerate(bench.iterrows()):
+                            with bcols[i]:
+                                st.markdown(f"""<div style="text-align:center;opacity:0.6;">
+                                    <div class="pitch-name">{p['name']}</div>
+                                    <div class="pitch-price">{p['pos']} · £{p['price']:.1f}m · {p['xpts_total']:.1f} xPts</div>
+                                </div>""", unsafe_allow_html=True)
+
+                    st.markdown("")
+
+                    # === OPTIMAL TRANSFER SUGGESTIONS ===
+                    st.markdown(
+                        '<div class="section-header">🎯 Optimal Transfer Suggestions '
+                        '<span class="source-tag src-model">MILP Solver</span></div>',
+                        unsafe_allow_html=True,
+                    )
+
+                    ft_available = team_data.get("free_transfers", 1)
+                    n_ft = st.radio(
+                        "Number of transfers",
+                        [1, 2, 3],
+                        horizontal=True,
+                        key="n_transfers",
+                        help=f"You have ~{ft_available} free transfer(s). Extra transfers cost -4 pts each."
+                    )
+
+                    extra_hits = max(0, n_ft - ft_available)
+                    if extra_hits > 0:
+                        st.warning(f"⚠️ {n_ft} transfers with {ft_available} FT = **-{extra_hits * 4} point hit**. "
+                                   f"Suggestions below already account for this — only showing transfers where the xPts gain exceeds the hit cost.")
+
+                    with st.spinner(f"Finding best {n_ft} transfer{'s' if n_ft > 1 else ''}..."):
+                        if n_ft <= 2:
+                            suggestions = find_optimal_transfers(
+                                my_squad, df, team_data["bank"],
+                                free_transfers=ft_available,
+                                purchase_prices=team_data.get("purchase_prices", {}),
+                                selling_prices_api=team_data.get("selling_prices_api", {}),
+                                n_transfers=n_ft,
+                                xpts_col="xpts_total",
+                            )
+                        else:
+                            # For 3 transfers: find best 2-transfer move, then find
+                            # the best additional single transfer from the resulting squad
+                            two_t = find_optimal_transfers(
+                                my_squad, df, team_data["bank"],
+                                free_transfers=ft_available,
+                                purchase_prices=team_data.get("purchase_prices", {}),
+                                selling_prices_api=team_data.get("selling_prices_api", {}),
+                                n_transfers=2,
+                                xpts_col="xpts_total",
+                            )
+                            suggestions = []
+                            for base in two_t[:3]:  # Top 3 two-transfer combos
+                                # Build hypothetical squad after the 2 transfers
+                                out_ids = {o["id"] for o in base["out"]}
+                                in_ids = {i["id"] for i in base["in"]}
+                                hypo_squad = my_squad[~my_squad["id"].isin(out_ids)].copy()
+                                in_players = df[df["id"].isin(in_ids)]
+                                hypo_squad = pd.concat([hypo_squad, in_players], ignore_index=True)
+                                new_bank = int(base.get("budget_after", 0) * 10)
+
+                                third_t = find_optimal_transfers(
+                                    hypo_squad, df, new_bank,
+                                    free_transfers=max(0, ft_available - 2),
+                                    purchase_prices=team_data.get("purchase_prices", {}),
+                                    selling_prices_api=team_data.get("selling_prices_api", {}),
+                                    n_transfers=1,
+                                    xpts_col="xpts_total",
+                                )
+                                for t3 in third_t[:2]:
+                                    combined_gain = base["xpts_gain"] + t3["xpts_gain"]
+                                    total_extra = max(0, 3 - ft_available)
+                                    combined_hit = total_extra * 4
+                                    net = combined_gain - combined_hit
+                                    if net > 0.5:
+                                        suggestions.append({
+                                            "out": base["out"] + t3["out"],
+                                            "in": base["in"] + t3["in"],
+                                            "xpts_gain": round(combined_gain, 1),
+                                            "net_gain": round(net, 1),
+                                            "hit": combined_hit,
+                                            "cost_change": round(base.get("cost_change", 0) + t3.get("cost_change", 0), 1),
+                                            "budget_after": t3.get("budget_after", 0),
+                                        })
+                            suggestions.sort(key=lambda x: x["net_gain"], reverse=True)
+                            suggestions = suggestions[:10]
+
+                    if suggestions:
+                        for idx, s in enumerate(suggestions[:8]):
+                            outs = s["out"]
+                            ins = s["in"]
+                            hit_str = f" · <span style='color:#f87171;'>-{s['hit']}pt hit</span>" if s["hit"] > 0 else " · <span style='color:#34d399;'>Free transfer</span>"
+                            budget_str = f"£{s['budget_after']:.1f}m ITB after" if s.get("budget_after") is not None else ""
+
+                            out_parts = []
+                            for o in outs:
+                                sp = calculate_selling_price(
+                                    o["id"], o["now_cost"],
+                                    team_data.get("purchase_prices", {}),
+                                    team_data.get("selling_prices_api", {})
+                                )
+                                out_parts.append(
+                                    f"<span class='transfer-out'>▼ {o['name']}</span>"
+                                    f"<span style='color:#5a6580;font-size:0.7rem;'>"
+                                    f" {o['pos']} · {o['team']} · SP £{sp/10:.1f}m · {o['xpts_total']:.1f}xPts</span>"
+                                )
+                            in_parts = []
+                            for i_p in ins:
+                                in_parts.append(
+                                    f"<span class='transfer-in'>▲ {i_p['name']}</span>"
+                                    f"<span style='color:#5a6580;font-size:0.7rem;'>"
+                                    f" {i_p['pos']} · {i_p['team']} · £{i_p['now_cost']/10:.1f}m · {i_p['xpts_total']:.1f}xPts</span>"
+                                )
+
+                            st.markdown(f"""<div class="transfer-card">
+                                {' &nbsp;'.join(out_parts)}
+                                &nbsp;<span class="transfer-arrow">→</span>&nbsp;
+                                {' &nbsp;'.join(in_parts)}
+                                <br>
+                                <span style="color:#34d399;font-size:0.72rem;font-weight:600;">
+                                    +{s['xpts_gain']} xPts (net +{s['net_gain']} after hit)
+                                </span>
+                                <span style="color:#5a6580;font-size:0.7rem;">{hit_str} · {budget_str}</span>
+                            </div>""", unsafe_allow_html=True)
+                    else:
+                        st.info("No improving transfers found — your squad looks strong!")
+
+                    # Full squad table
+                    st.markdown("")
+                    st.subheader("Full Squad Breakdown")
+                    sq_show = my_squad.sort_values(["is_starter", "pos_id", "xpts_total"],
+                                                    ascending=[False, True, False])
+                    # Add selling price column
+                    sq_show = sq_show.copy()
+                    sq_show["sell_price"] = sq_show.apply(
+                        lambda r: calculate_selling_price(
+                            r["id"], r["now_cost"],
+                            team_data.get("purchase_prices", {}),
+                            team_data.get("selling_prices_api", {})
+                        ) / 10, axis=1
+                    )
+                    sq_display = sq_show[["name", "team", "pos", "price", "sell_price", "total_points",
+                                          "form_str", "xpts_next_gw", "xpts_total", "is_starter"]].copy()
+                    sq_display.columns = ["Player", "Team", "Pos", "Mkt Price", "Sell Price", "Pts",
+                                          "Form", "xPts GW", "xPts 6GW", "Starter"]
+                    sq_display["Starter"] = sq_display["Starter"].map({True: "XI", False: "Bench"})
+                    sq_display = sq_display.reset_index(drop=True)
+                    sq_display.index += 1
+                    st.dataframe(sq_display, use_container_width=True)
+                else:
+                    st.warning("Could not match squad players to current data.")
+        else:
+            st.info("Enter your FPL Team ID above to get personalised transfer suggestions. "
+                    "You can find it in the URL when you view your team on the FPL website "
+                    "(e.g. fantasy.premierleague.com/entry/**123456**/event/1)")
+
+    # ==================== DASHBOARD ====================
+    with tab2:
         if len(active) > 0:
             c1, c2, c3, c4 = st.columns(4)
             top_xpts = qualified.loc[qualified["xpts_total"].idxmax()] if len(qualified) > 0 else None
@@ -820,7 +1371,7 @@ def main():
             st.dataframe(dd, use_container_width=True, height=380)
 
     # ==================== PLAYER PROJECTIONS ====================
-    with tab2:
+    with tab3:
         fc1, fc2, fc3, fc4, fc5 = st.columns([2, 1, 1, 1, 1])
         with fc1:
             search = st.text_input("🔍 Search", "", key="ps2")
@@ -861,7 +1412,7 @@ def main():
         st.caption(f"Showing {min(80, len(fl))} of {len(fl)} players · xPts model blends FPL xG/xA + betting odds")
 
     # ==================== OPTIMAL SQUAD (MILP) ====================
-    with tab3:
+    with tab4:
         st.markdown(
             '<div class="section-header">⭐ MILP-Optimised Squad '
             '<span class="source-tag src-model">PuLP Solver</span></div>',
@@ -929,7 +1480,7 @@ def main():
                 st.warning(f"Could not find optimal squad: {solve_err}")
 
     # ==================== TRANSFER PLANNER ====================
-    with tab4:
+    with tab5:
         st.markdown('<div class="section-header">🔄 Transfer Suggestions <span class="source-tag src-model">xPts Model</span></div>', unsafe_allow_html=True)
         st.caption("Finds the highest-xPts replacements for underperforming popular players, matched by position.")
 
@@ -994,7 +1545,7 @@ def main():
             st.dataframe(fo, use_container_width=True)
 
     # ==================== FIXTURES ====================
-    with tab5:
+    with tab6:
         st.markdown('<div class="section-header">Fixture Difficulty — Next 6 Gameweeks <span class="source-tag src-odds">Odds-enhanced</span></div>', unsafe_allow_html=True)
         gw_id = current_gw["id"] if current_gw else 1
         gw_range = list(range(gw_id, gw_id + 6))
