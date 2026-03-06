@@ -1101,47 +1101,182 @@ def find_best_single_transfer_for_gw(squad_df, all_players_df, bank,
     return best
 
 
+def solve_free_hit_squad(all_players_df, xpts_map, gw_id, budget=1000):
+    """Free Hit: pick best possible 15-man squad for a single GW."""
+    eligible = all_players_df[
+        (all_players_df["minutes"] > 45) &
+        (all_players_df["status"].isin(["a", "d", ""]))
+    ].copy()
+    eligible["xpts_gw"] = eligible["id"].map(lambda pid: xpts_map.get(pid, {}).get(gw_id, 0))
+    eligible = eligible[eligible["xpts_gw"] > 0].copy()
+    eligible["xpts_gw"] = eligible["xpts_gw"].fillna(0)
+    eligible["now_cost"] = eligible["now_cost"].fillna(0).astype(int)
+    if len(eligible) < 15:
+        return None
+
+    eligible = eligible.reset_index(drop=True)
+    pid_map = {row["id"]: i for i, row in eligible.iterrows()}
+    xv = eligible["xpts_gw"].tolist()
+    cv = eligible["now_cost"].tolist()
+    pv = eligible["pos_id"].tolist()
+    tv = eligible["team_id"].tolist()
+    pids = eligible["id"].tolist()
+
+    prob = LpProblem(f"FH_GW{gw_id}", LpMaximize)
+    x = {pid: LpVariable(f"fh_{gw_id}_{pid}", cat="Binary") for pid in pids}
+    prob += lpSum(x[pid] * xv[pid_map[pid]] for pid in pids)
+    prob += lpSum(x[pid] * cv[pid_map[pid]] for pid in pids) <= budget
+    prob += lpSum(x[pid] for pid in pids) == 15
+    for pos_id, cnt in [(1, 2), (2, 5), (3, 5), (4, 3)]:
+        prob += lpSum(x[pid] for pid in pids if pv[pid_map[pid]] == pos_id) == cnt
+    for tid in set(tv):
+        prob += lpSum(x[pid] for pid in pids if tv[pid_map[pid]] == tid) <= 3
+    try:
+        prob.solve(PULP_CBC_CMD(msg=0, timeLimit=30))
+    except Exception:
+        return None
+    if LpStatus[prob.status] != "Optimal":
+        return None
+    sel = [pid for pid in pids if value(x[pid]) is not None and value(x[pid]) > 0.5]
+    return eligible[eligible["id"].isin(sel)].copy()
+
+
+def solve_wildcard_squad(all_players_df, xpts_map, planning_gw, n_future, budget=1000):
+    """Wildcard: best 15-man squad for remaining xPts over multiple GWs."""
+    eligible = all_players_df[
+        (all_players_df["minutes"] > 45) &
+        (all_players_df["status"].isin(["a", "d", ""]))
+    ].copy()
+    eligible["xpts_rem"] = eligible["id"].map(
+        lambda pid: sum(xpts_map.get(pid, {}).get(gw, 0) for gw in range(planning_gw, planning_gw + n_future))
+    )
+    eligible = eligible[eligible["xpts_rem"] > 0].copy()
+    eligible["xpts_rem"] = eligible["xpts_rem"].fillna(0)
+    eligible["now_cost"] = eligible["now_cost"].fillna(0).astype(int)
+    if len(eligible) < 15:
+        return None
+
+    eligible = eligible.reset_index(drop=True)
+    pid_map = {row["id"]: i for i, row in eligible.iterrows()}
+    xv = eligible["xpts_rem"].tolist()
+    cv = eligible["now_cost"].tolist()
+    pv = eligible["pos_id"].tolist()
+    tv = eligible["team_id"].tolist()
+    pids = eligible["id"].tolist()
+
+    prob = LpProblem("Wildcard", LpMaximize)
+    x = {pid: LpVariable(f"wc_{pid}", cat="Binary") for pid in pids}
+    prob += lpSum(x[pid] * xv[pid_map[pid]] for pid in pids)
+    prob += lpSum(x[pid] * cv[pid_map[pid]] for pid in pids) <= budget
+    prob += lpSum(x[pid] for pid in pids) == 15
+    for pos_id, cnt in [(1, 2), (2, 5), (3, 5), (4, 3)]:
+        prob += lpSum(x[pid] for pid in pids if pv[pid_map[pid]] == pos_id) == cnt
+    for tid in set(tv):
+        prob += lpSum(x[pid] for pid in pids if tv[pid_map[pid]] == tid) <= 3
+    try:
+        prob.solve(PULP_CBC_CMD(msg=0, timeLimit=30))
+    except Exception:
+        return None
+    if LpStatus[prob.status] != "Optimal":
+        return None
+    sel = [pid for pid in pids if value(x[pid]) is not None and value(x[pid]) > 0.5]
+    return eligible[eligible["id"].isin(sel)].copy()
+
+
+def find_best_captain(squad_df, xpts_map, gw_id):
+    """Find best captain (highest xPts) for a specific GW."""
+    if squad_df is None or len(squad_df) == 0:
+        return None
+    sq = squad_df.copy()
+    sq["xpts_gw"] = sq["id"].map(lambda pid: xpts_map.get(pid, {}).get(gw_id, 0))
+    return sq.loc[sq["xpts_gw"].idxmax()]
+
+
 def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
                        purchase_prices, selling_prices_api, xpts_map,
-                       planning_gw_id, n_gws=6):
+                       planning_gw_id, n_gws=6, chip_schedule=None):
     """
-    Build a gameweek-by-gameweek transfer plan with rolling squad state.
-    For each GW: suggest best transfer, then show best XI.
-    Each GW's squad reflects transfers made in previous GWs.
+    Chip-aware rolling planner.
+    chip_schedule: {gw_id: chip_name} e.g. {31: "wildcard", 33: "bench_boost"}
+    Chips: "wildcard", "free_hit", "triple_captain", "bench_boost"
     """
+    if chip_schedule is None:
+        chip_schedule = {}
+
     plan = []
     current_squad = my_squad_df.copy()
     current_bank = bank
     current_ft = free_transfers
     current_purchase = purchase_prices.copy()
     current_selling = selling_prices_api.copy()
+    pre_fh_squad = None
 
     for i in range(n_gws):
         gw = planning_gw_id + i
+        chip = chip_schedule.get(gw, None)
 
-        # Check xPts exist for this GW
         has_fixtures = any(xpts_map.get(pid, {}).get(gw, 0) > 0 for pid in current_squad["id"])
         if not has_fixtures:
             break
 
-        # Find best transfer for this GW
+        gw_entry = {
+            "gw": gw, "chip": chip, "transfer": None, "hit": 0,
+            "squad": current_squad.copy(), "xi": None, "bench": None,
+            "captain": None, "captain_multiplier": 2, "bench_boost": False,
+        }
+
+        # === FREE HIT ===
+        if chip == "free_hit":
+            pre_fh_squad = current_squad.copy()
+            total_val = int(current_bank + current_squad["now_cost"].sum())
+            fh_squad = solve_free_hit_squad(all_players_df, xpts_map, gw, total_val)
+            if fh_squad is not None:
+                gw_entry["squad"] = fh_squad
+                xi, bench = solve_best_xi_for_gw(fh_squad, xpts_map, gw)
+            else:
+                xi, bench = solve_best_xi_for_gw(current_squad, xpts_map, gw)
+            gw_entry["xi"] = xi
+            gw_entry["bench"] = bench
+            gw_entry["captain"] = find_best_captain(xi, xpts_map, gw) if xi is not None else None
+            current_ft = min(current_ft + 1, 5)
+            plan.append(gw_entry)
+            continue
+
+        # Restore after free hit
+        if pre_fh_squad is not None:
+            current_squad = pre_fh_squad
+            pre_fh_squad = None
+
+        # === WILDCARD ===
+        if chip == "wildcard":
+            total_val = int(current_bank + current_squad["now_cost"].sum())
+            wc_squad = solve_wildcard_squad(all_players_df, xpts_map, gw, n_gws - i, total_val)
+            if wc_squad is not None:
+                current_squad = wc_squad
+                gw_entry["squad"] = wc_squad
+                for _, p in wc_squad.iterrows():
+                    current_purchase[p["id"]] = p["now_cost"]
+                current_bank = total_val - wc_squad["now_cost"].sum()
+            current_ft = 1
+            xi, bench = solve_best_xi_for_gw(current_squad, xpts_map, gw)
+            gw_entry["xi"] = xi
+            gw_entry["bench"] = bench
+            gw_entry["captain"] = find_best_captain(xi, xpts_map, gw) if xi is not None else None
+            plan.append(gw_entry)
+            continue
+
+        # === NORMAL / TC / BB ===
         transfer = find_best_single_transfer_for_gw(
             current_squad, all_players_df, current_bank,
             current_purchase, current_selling, xpts_map, gw
         )
 
-        gw_entry = {"gw": gw, "transfer": None, "hit": 0, "squad": current_squad.copy(), "xi": None, "bench": None}
-
         if transfer and transfer["xpts_gain"] > 0.3:
             hit_cost = 4 if current_ft <= 0 else 0
             net_gain = transfer["xpts_gain"] - hit_cost
-
-            # Only make the transfer if it's a net positive (or if it's free)
             if net_gain > 0 or hit_cost == 0:
                 gw_entry["transfer"] = transfer
                 gw_entry["hit"] = hit_cost
-
-                # Apply transfer to squad
                 out_id = transfer["out"]["id"]
                 in_id = transfer["in"]["id"]
                 current_squad = current_squad[current_squad["id"] != out_id]
@@ -1152,25 +1287,24 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
                 current_purchase[in_id] = transfer["in"]["now_cost"]
                 if out_id in current_selling:
                     del current_selling[out_id]
-
-                # FT accounting
                 if current_ft > 0:
                     current_ft -= 1
-                # else: hit taken, FT stays at 0
-
-                # Next GW gets +1 FT (up to max 5)
                 current_ft = min(current_ft + 1, 5)
             else:
-                # Don't make transfer, bank the FT
                 current_ft = min(current_ft + 1, 5)
         else:
-            # No transfer — bank the FT
             current_ft = min(current_ft + 1, 5)
 
-        # Solve best XI for this GW
         xi, bench = solve_best_xi_for_gw(current_squad, xpts_map, gw)
         gw_entry["xi"] = xi
         gw_entry["bench"] = bench
+        gw_entry["squad"] = current_squad.copy()
+        gw_entry["captain"] = find_best_captain(xi, xpts_map, gw) if xi is not None else None
+
+        if chip == "triple_captain":
+            gw_entry["captain_multiplier"] = 3
+        if chip == "bench_boost":
+            gw_entry["bench_boost"] = True
 
         plan.append(gw_entry)
 
@@ -1382,9 +1516,38 @@ def main():
                     )
 
                     ft_available = team_data.get("free_transfers", 1)
+
+                    # Chip selection
+                    st.markdown("**Chip Schedule** — select which GW to play each chip (leave as None to skip)")
+                    gw_options = [planning_gw_id + i for i in range(6)]
+                    chip_cols = st.columns(4)
+                    with chip_cols[0]:
+                        wc_gw = st.selectbox("Wildcard", ["None"] + gw_options, key="wc_gw")
+                    with chip_cols[1]:
+                        fh_gw = st.selectbox("Free Hit", ["None"] + gw_options, key="fh_gw")
+                    with chip_cols[2]:
+                        tc_gw = st.selectbox("Triple Captain", ["None"] + gw_options, key="tc_gw")
+                    with chip_cols[3]:
+                        bb_gw = st.selectbox("Bench Boost", ["None"] + gw_options, key="bb_gw")
+
+                    chip_schedule = {}
+                    if wc_gw != "None":
+                        chip_schedule[int(wc_gw)] = "wildcard"
+                    if fh_gw != "None":
+                        chip_schedule[int(fh_gw)] = "free_hit"
+                    if tc_gw != "None":
+                        chip_schedule[int(tc_gw)] = "triple_captain"
+                    if bb_gw != "None":
+                        chip_schedule[int(bb_gw)] = "bench_boost"
+
+                    # Validate: no two chips on same GW
+                    chip_gws = [wc_gw, fh_gw, tc_gw, bb_gw]
+                    chip_gws_used = [g for g in chip_gws if g != "None"]
+                    if len(chip_gws_used) != len(set(chip_gws_used)):
+                        st.error("You can only play one chip per gameweek.")
+
                     st.caption(
                         f"You have **{ft_available} free transfer(s)**. "
-                        f"The planner suggests the best single transfer each GW and shows the optimal starting XI. "
                         f"Hits (-4pts) are only taken when the gain exceeds the cost."
                     )
 
@@ -1398,6 +1561,7 @@ def main():
                             xpts_map=xpts_map,
                             planning_gw_id=planning_gw_id,
                             n_gws=6,
+                            chip_schedule=chip_schedule,
                         )
 
                     if plan:
@@ -1407,11 +1571,42 @@ def main():
                             xi = gw_entry["xi"]
                             bench = gw_entry["bench"]
                             hit = gw_entry["hit"]
+                            chip = gw_entry.get("chip")
+                            captain = gw_entry.get("captain")
+                            cap_mult = gw_entry.get("captain_multiplier", 2)
+                            is_bb = gw_entry.get("bench_boost", False)
 
-                            with st.expander(f"**Gameweek {gw}**", expanded=(gw == planning_gw_id)):
+                            # Expander label with chip badge
+                            chip_labels = {
+                                "wildcard": "🃏 WILDCARD",
+                                "free_hit": "⚡ FREE HIT",
+                                "triple_captain": "👑 TRIPLE CAPTAIN",
+                                "bench_boost": "💪 BENCH BOOST",
+                            }
+                            chip_str = f" — {chip_labels.get(chip, '')}" if chip else ""
+                            with st.expander(f"**Gameweek {gw}**{chip_str}", expanded=(gw == planning_gw_id)):
 
-                                # Transfer suggestion
-                                if transfer:
+                                # Transfer / chip action
+                                if chip == "wildcard":
+                                    squad_count = len(gw_entry.get("squad", []))
+                                    st.markdown(
+                                        f"<div class='transfer-card'>"
+                                        f"<span style='color:#a78bfa;font-weight:700;'>🃏 WILDCARD ACTIVE</span>"
+                                        f"<br><span style='color:#8892a8;font-size:0.72rem;'>"
+                                        f"Full squad rebuilt via MILP solver ({squad_count} players) — optimised for remaining GWs</span>"
+                                        f"</div>",
+                                        unsafe_allow_html=True,
+                                    )
+                                elif chip == "free_hit":
+                                    st.markdown(
+                                        f"<div class='transfer-card'>"
+                                        f"<span style='color:#38bdf8;font-weight:700;'>⚡ FREE HIT ACTIVE</span>"
+                                        f"<br><span style='color:#8892a8;font-size:0.72rem;'>"
+                                        f"Best possible squad for this single GW — reverts to your team next week</span>"
+                                        f"</div>",
+                                        unsafe_allow_html=True,
+                                    )
+                                elif transfer:
                                     o = transfer["out"]
                                     i_p = transfer["in"]
                                     sp = calculate_selling_price(
@@ -1475,14 +1670,31 @@ def main():
                                                     </div>""", unsafe_allow_html=True)
 
                                     if bench is not None and len(bench) > 0:
+                                        if is_bb:
+                                            bench_label = "💪 BENCH BOOST — all bench players score:"
+                                        else:
+                                            bench_label = "Bench:"
                                         bench_names = ", ".join([
                                             f"{r['name']} ({r.get('xpts_gw', 0):.1f})"
                                             for _, r in bench.iterrows()
                                         ])
                                         st.markdown(
-                                            f"<span style='color:#5a6580;font-size:0.68rem;'>Bench: {bench_names}</span>",
+                                            f"<span style='color:#5a6580;font-size:0.68rem;'>"
+                                            f"{'💪 ' if is_bb else ''}{bench_label} {bench_names}</span>",
                                             unsafe_allow_html=True,
                                         )
+
+                                # Captain recommendation
+                                if captain is not None:
+                                    cap_xpts = xpts_map.get(captain.get("id", 0), {}).get(gw, 0)
+                                    cap_label = "Triple Captain" if cap_mult == 3 else "Captain"
+                                    cap_emoji = "👑" if cap_mult == 3 else "©️"
+                                    st.markdown(
+                                        f"<span style='color:#fbbf24;font-size:0.78rem;font-weight:600;'>"
+                                        f"{cap_emoji} {cap_label}: {captain.get('name', '?')} "
+                                        f"({cap_xpts:.1f} xPts × {cap_mult} = {cap_xpts * cap_mult:.1f})</span>",
+                                        unsafe_allow_html=True,
+                                    )
                     else:
                         st.info("Could not build a rolling plan — not enough fixture data.")
 
