@@ -18,7 +18,8 @@ import requests
 import pandas as pd
 import numpy as np
 from pulp import (
-    LpProblem, LpMaximize, LpVariable, lpSum, LpStatus, value
+    LpProblem, LpMaximize, LpVariable, lpSum, LpStatus, value,
+    PULP_CBC_CMD,
 )
 from datetime import datetime
 from io import StringIO
@@ -417,45 +418,59 @@ def solve_optimal_squad(players_df, xpts_col="xpts_total", budget=1000):
     if len(eligible) < 15:
         return None, "Not enough eligible players"
 
+    # Ensure no NaN values in key columns (NaN crashes PuLP)
+    eligible[xpts_col] = eligible[xpts_col].fillna(0).astype(float)
+    eligible["now_cost"] = eligible["now_cost"].fillna(0).astype(int)
+    eligible = eligible[eligible[xpts_col].notna() & eligible["now_cost"].notna()]
+
+    if len(eligible) < 15:
+        return None, "Not enough eligible players after NaN removal"
+
     prob = LpProblem("FPL_Squad", LpMaximize)
+
+    # Build lookup dicts for fast, safe access
+    eligible = eligible.reset_index(drop=True)
+    pid_to_idx = {row["id"]: i for i, row in eligible.iterrows()}
+    xpts_vals = eligible[xpts_col].tolist()
+    cost_vals = eligible["now_cost"].tolist()
+    pos_vals = eligible["pos_id"].tolist()
+    team_vals = eligible["team_id"].tolist()
 
     # Decision variables: x_i = 1 if player i is selected
     player_ids = eligible["id"].tolist()
     x = {pid: LpVariable(f"x_{pid}", cat="Binary") for pid in player_ids}
 
     # Objective: maximise total xPts
-    prob += lpSum(
-        x[pid] * eligible.loc[eligible["id"] == pid, xpts_col].values[0]
-        for pid in player_ids
-    )
+    prob += lpSum(x[pid] * xpts_vals[pid_to_idx[pid]] for pid in player_ids)
 
     # Budget constraint
-    prob += lpSum(
-        x[pid] * eligible.loc[eligible["id"] == pid, "now_cost"].values[0]
-        for pid in player_ids
-    ) <= budget
+    prob += lpSum(x[pid] * cost_vals[pid_to_idx[pid]] for pid in player_ids) <= budget
 
     # Squad size = 15
     prob += lpSum(x[pid] for pid in player_ids) == 15
 
     # Position constraints: 2 GK, 5 DEF, 5 MID, 3 FWD
     for pos_id, count in [(1, 2), (2, 5), (3, 5), (4, 3)]:
-        pos_pids = eligible[eligible["pos_id"] == pos_id]["id"].tolist()
+        pos_pids = [pid for pid in player_ids if pos_vals[pid_to_idx[pid]] == pos_id]
         prob += lpSum(x[pid] for pid in pos_pids) == count
 
     # Max 3 per team
-    for team_id in eligible["team_id"].unique():
-        team_pids = eligible[eligible["team_id"] == team_id]["id"].tolist()
+    for team_id in set(team_vals):
+        team_pids = [pid for pid in player_ids if team_vals[pid_to_idx[pid]] == team_id]
         prob += lpSum(x[pid] for pid in team_pids) <= 3
 
     # Solve
-    prob.solve(pulp_solver=None)  # Uses default solver (CBC)
+    try:
+        solver = PULP_CBC_CMD(msg=0, timeLimit=30)
+        prob.solve(solver)
+    except Exception as e:
+        return None, f"Solver error: {e}"
 
     if LpStatus[prob.status] != "Optimal":
         return None, f"Solver status: {LpStatus[prob.status]}"
 
     # Extract selected players
-    selected_ids = [pid for pid in player_ids if value(x[pid]) == 1]
+    selected_ids = [pid for pid in player_ids if value(x[pid]) is not None and value(x[pid]) > 0.5]
     squad = eligible[eligible["id"].isin(selected_ids)].copy()
 
     return squad, None
@@ -470,43 +485,48 @@ def solve_best_xi(squad_df, xpts_col="xpts_next_gw"):
         return None, None
 
     prob = LpProblem("FPL_XI", LpMaximize)
+    squad_df = squad_df.reset_index(drop=True)
     pids = squad_df["id"].tolist()
+    pid_to_idx = {row["id"]: i for i, row in squad_df.iterrows()}
+    xpts_vals = squad_df[xpts_col].fillna(0).tolist()
+    pos_list = squad_df["pos_id"].tolist()
     x = {pid: LpVariable(f"xi_{pid}", cat="Binary") for pid in pids}
 
     # Objective
-    prob += lpSum(
-        x[pid] * squad_df.loc[squad_df["id"] == pid, xpts_col].values[0]
-        for pid in pids
-    )
+    prob += lpSum(x[pid] * xpts_vals[pid_to_idx[pid]] for pid in pids)
 
     # Exactly 11 starters
     prob += lpSum(x[pid] for pid in pids) == 11
 
     # Exactly 1 GK
-    gk_pids = squad_df[squad_df["pos_id"] == 1]["id"].tolist()
+    gk_pids = [pid for pid in pids if pos_list[pid_to_idx[pid]] == 1]
     prob += lpSum(x[pid] for pid in gk_pids) == 1
 
     # DEF: 3-5
-    def_pids = squad_df[squad_df["pos_id"] == 2]["id"].tolist()
+    def_pids = [pid for pid in pids if pos_list[pid_to_idx[pid]] == 2]
     prob += lpSum(x[pid] for pid in def_pids) >= 3
     prob += lpSum(x[pid] for pid in def_pids) <= 5
 
     # MID: 2-5
-    mid_pids = squad_df[squad_df["pos_id"] == 3]["id"].tolist()
+    mid_pids = [pid for pid in pids if pos_list[pid_to_idx[pid]] == 3]
     prob += lpSum(x[pid] for pid in mid_pids) >= 2
     prob += lpSum(x[pid] for pid in mid_pids) <= 5
 
     # FWD: 1-3
-    fwd_pids = squad_df[squad_df["pos_id"] == 4]["id"].tolist()
+    fwd_pids = [pid for pid in pids if pos_list[pid_to_idx[pid]] == 4]
     prob += lpSum(x[pid] for pid in fwd_pids) >= 1
     prob += lpSum(x[pid] for pid in fwd_pids) <= 3
 
-    prob.solve(pulp_solver=None)
+    try:
+        solver = PULP_CBC_CMD(msg=0, timeLimit=15)
+        prob.solve(solver)
+    except Exception:
+        return None, None
 
     if LpStatus[prob.status] != "Optimal":
         return None, None
 
-    xi_ids = [pid for pid in pids if value(x[pid]) == 1]
+    xi_ids = [pid for pid in pids if value(x[pid]) is not None and value(x[pid]) > 0.5]
     xi = squad_df[squad_df["id"].isin(xi_ids)].copy()
     bench = squad_df[~squad_df["id"].isin(xi_ids)].copy()
     return xi, bench
