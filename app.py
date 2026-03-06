@@ -1266,34 +1266,59 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
             continue
 
         # === NORMAL / TC / BB ===
-        transfer = find_best_single_transfer_for_gw(
-            current_squad, all_players_df, current_bank,
-            current_purchase, current_selling, xpts_map, gw
-        )
+        # Use up to all available FTs, plus hits if gain > 4pts
+        transfers_made = []
+        transfers_ft_used = 0
+        total_hit = 0
 
-        if transfer and transfer["xpts_gain"] > 0.3:
-            hit_cost = 4 if current_ft <= 0 else 0
+        # Keep finding improving transfers until no more gains
+        max_transfers = min(current_ft + 3, 5)  # allow up to 3 hits beyond FTs
+        for t_num in range(max_transfers):
+            transfer = find_best_single_transfer_for_gw(
+                current_squad, all_players_df, current_bank,
+                current_purchase, current_selling, xpts_map, gw
+            )
+
+            if transfer is None or transfer["xpts_gain"] < 0.3:
+                break  # no more improving transfers
+
+            # Is this a free transfer or a hit?
+            is_free = (t_num < current_ft)
+            hit_cost = 0 if is_free else 4
             net_gain = transfer["xpts_gain"] - hit_cost
-            if net_gain > 0 or hit_cost == 0:
-                gw_entry["transfer"] = transfer
-                gw_entry["hit"] = hit_cost
-                out_id = transfer["out"]["id"]
-                in_id = transfer["in"]["id"]
-                current_squad = current_squad[current_squad["id"] != out_id]
-                in_player = all_players_df[all_players_df["id"] == in_id]
-                if len(in_player) > 0:
-                    current_squad = pd.concat([current_squad, in_player.iloc[:1]], ignore_index=True)
-                current_bank = transfer["new_bank"]
-                current_purchase[in_id] = transfer["in"]["now_cost"]
-                if out_id in current_selling:
-                    del current_selling[out_id]
-                if current_ft > 0:
-                    current_ft -= 1
-                current_ft = min(current_ft + 1, 5)
+
+            # For free transfers: always make if gain > 0.3
+            # For hits: only make if gain clearly exceeds the 4pt cost
+            if is_free and transfer["xpts_gain"] > 0.3:
+                pass  # proceed
+            elif not is_free and net_gain > 0.5:
+                total_hit += hit_cost
             else:
-                current_ft = min(current_ft + 1, 5)
-        else:
-            current_ft = min(current_ft + 1, 5)
+                break  # not worth it
+
+            # Apply transfer
+            transfers_made.append(transfer)
+            out_id = transfer["out"]["id"]
+            in_id = transfer["in"]["id"]
+            current_squad = current_squad[current_squad["id"] != out_id]
+            in_player = all_players_df[all_players_df["id"] == in_id]
+            if len(in_player) > 0:
+                current_squad = pd.concat([current_squad, in_player.iloc[:1]], ignore_index=True)
+            current_bank = transfer["new_bank"]
+            current_purchase[in_id] = transfer["in"]["now_cost"]
+            if out_id in current_selling:
+                del current_selling[out_id]
+            if is_free:
+                transfers_ft_used += 1
+
+        # Store all transfers for this GW
+        gw_entry["transfers"] = transfers_made
+        gw_entry["hit"] = total_hit
+        gw_entry["ft_used"] = transfers_ft_used
+
+        # FT accounting: spent some FTs, then gain 1 for next GW
+        remaining_ft = current_ft - transfers_ft_used
+        current_ft = min(remaining_ft + 1, 5)
 
         xi, bench = solve_best_xi_for_gw(current_squad, xpts_map, gw)
         gw_entry["xi"] = xi
@@ -1508,27 +1533,28 @@ def main():
 
                     st.markdown("")
 
-                    # === ROLLING GAMEWEEK PLANNER ===
+                    # === CHIP & TRANSFER PLANNER ===
                     st.markdown(
-                        '<div class="section-header">🗓️ Gameweek-by-Gameweek Transfer Plan '
+                        '<div class="section-header">🗓️ Gameweek-by-Gameweek Planner '
                         '<span class="source-tag src-model">Rolling Planner</span></div>',
                         unsafe_allow_html=True,
                     )
 
                     ft_available = team_data.get("free_transfers", 1)
+                    st.caption(f"You have **{ft_available} free transfer(s)** available.")
 
-                    # Chip selection
-                    st.markdown("**Chip Schedule** — select which GW to play each chip (leave as None to skip)")
+                    # Step 1: Chip selection
+                    st.markdown("**Step 1: Set your chip schedule**")
                     gw_options = [planning_gw_id + i for i in range(6)]
                     chip_cols = st.columns(4)
                     with chip_cols[0]:
-                        wc_gw = st.selectbox("Wildcard", ["None"] + gw_options, key="wc_gw")
+                        wc_gw = st.selectbox("🃏 Wildcard", ["None"] + gw_options, key="wc_gw")
                     with chip_cols[1]:
-                        fh_gw = st.selectbox("Free Hit", ["None"] + gw_options, key="fh_gw")
+                        fh_gw = st.selectbox("⚡ Free Hit", ["None"] + gw_options, key="fh_gw")
                     with chip_cols[2]:
-                        tc_gw = st.selectbox("Triple Captain", ["None"] + gw_options, key="tc_gw")
+                        tc_gw = st.selectbox("👑 Triple Captain", ["None"] + gw_options, key="tc_gw")
                     with chip_cols[3]:
-                        bb_gw = st.selectbox("Bench Boost", ["None"] + gw_options, key="bb_gw")
+                        bb_gw = st.selectbox("💪 Bench Boost", ["None"] + gw_options, key="bb_gw")
 
                     chip_schedule = {}
                     if wc_gw != "None":
@@ -1540,163 +1566,251 @@ def main():
                     if bb_gw != "None":
                         chip_schedule[int(bb_gw)] = "bench_boost"
 
-                    # Validate: no two chips on same GW
-                    chip_gws = [wc_gw, fh_gw, tc_gw, bb_gw]
-                    chip_gws_used = [g for g in chip_gws if g != "None"]
+                    # Validate
+                    chip_gws_used = [g for g in [wc_gw, fh_gw, tc_gw, bb_gw] if g != "None"]
                     if len(chip_gws_used) != len(set(chip_gws_used)):
                         st.error("You can only play one chip per gameweek.")
 
-                    st.caption(
-                        f"You have **{ft_available} free transfer(s)**. "
-                        f"Hits (-4pts) are only taken when the gain exceeds the cost."
-                    )
-
-                    with st.spinner("Building 6-gameweek rolling plan..."):
-                        plan = build_rolling_plan(
-                            my_squad, df,
-                            bank=team_data["bank"],
-                            free_transfers=ft_available,
-                            purchase_prices=team_data.get("purchase_prices", {}),
-                            selling_prices_api=team_data.get("selling_prices_api", {}),
-                            xpts_map=xpts_map,
-                            planning_gw_id=planning_gw_id,
-                            n_gws=6,
-                            chip_schedule=chip_schedule,
+                    # Show chip summary
+                    if chip_schedule:
+                        chip_labels = {"wildcard": "🃏 Wildcard", "free_hit": "⚡ Free Hit",
+                                       "triple_captain": "👑 Triple Captain", "bench_boost": "💪 Bench Boost"}
+                        chip_summary = " · ".join([
+                            f"GW{gw}: {chip_labels.get(c, c)}" for gw, c in sorted(chip_schedule.items())
+                        ])
+                        st.info(f"Chip plan: {chip_summary}")
+                    else:
+                        st.markdown(
+                            "<span style='color:#5a6580;font-size:0.8rem;'>No chips selected — planning with normal transfers only</span>",
+                            unsafe_allow_html=True,
                         )
 
-                    if plan:
-                        for gw_entry in plan:
-                            gw = gw_entry["gw"]
-                            transfer = gw_entry["transfer"]
-                            xi = gw_entry["xi"]
-                            bench = gw_entry["bench"]
-                            hit = gw_entry["hit"]
-                            chip = gw_entry.get("chip")
-                            captain = gw_entry.get("captain")
-                            cap_mult = gw_entry.get("captain_multiplier", 2)
-                            is_bb = gw_entry.get("bench_boost", False)
+                    st.markdown("")
 
-                            # Expander label with chip badge
-                            chip_labels = {
-                                "wildcard": "🃏 WILDCARD",
-                                "free_hit": "⚡ FREE HIT",
-                                "triple_captain": "👑 TRIPLE CAPTAIN",
-                                "bench_boost": "💪 BENCH BOOST",
-                            }
-                            chip_str = f" — {chip_labels.get(chip, '')}" if chip else ""
-                            with st.expander(f"**Gameweek {gw}**{chip_str}", expanded=(gw == planning_gw_id)):
+                    # Step 2: Generate plan
+                    st.markdown("**Step 2: Generate your optimal plan**")
+                    generate = st.button("🚀 Generate 6-Gameweek Plan", use_container_width=True, type="primary")
 
-                                # Transfer / chip action
-                                if chip == "wildcard":
-                                    squad_count = len(gw_entry.get("squad", []))
-                                    st.markdown(
-                                        f"<div class='transfer-card'>"
-                                        f"<span style='color:#a78bfa;font-weight:700;'>🃏 WILDCARD ACTIVE</span>"
-                                        f"<br><span style='color:#8892a8;font-size:0.72rem;'>"
-                                        f"Full squad rebuilt via MILP solver ({squad_count} players) — optimised for remaining GWs</span>"
-                                        f"</div>",
-                                        unsafe_allow_html=True,
-                                    )
-                                elif chip == "free_hit":
-                                    st.markdown(
-                                        f"<div class='transfer-card'>"
-                                        f"<span style='color:#38bdf8;font-weight:700;'>⚡ FREE HIT ACTIVE</span>"
-                                        f"<br><span style='color:#8892a8;font-size:0.72rem;'>"
-                                        f"Best possible squad for this single GW — reverts to your team next week</span>"
-                                        f"</div>",
-                                        unsafe_allow_html=True,
-                                    )
-                                elif transfer:
-                                    o = transfer["out"]
-                                    i_p = transfer["in"]
-                                    sp = calculate_selling_price(
-                                        o["id"], o["now_cost"],
-                                        team_data.get("purchase_prices", {}),
-                                        team_data.get("selling_prices_api", {})
-                                    )
-                                    hit_str = (
-                                        f"<span style='color:#f87171;font-weight:600;'>-{hit}pt hit</span>"
-                                        if hit > 0
-                                        else "<span style='color:#34d399;font-weight:600;'>Free transfer</span>"
-                                    )
-                                    st.markdown(f"""<div class="transfer-card">
-                                        <span class="transfer-out">▼ {o['name']}</span>
-                                        <span style="color:#5a6580;font-size:0.7rem;">
-                                            {o.get('pos','?')} · {o.get('team','?')} · SP £{sp/10:.1f}m
-                                        </span>
-                                        &nbsp;<span class="transfer-arrow">→</span>&nbsp;
-                                        <span class="transfer-in">▲ {i_p['name']}</span>
-                                        <span style="color:#5a6580;font-size:0.7rem;">
-                                            {i_p.get('pos','?')} · {i_p.get('team','?')} · £{i_p['now_cost']/10:.1f}m
-                                        </span>
-                                        <br>
-                                        <span style="color:#34d399;font-size:0.72rem;font-weight:600;">
-                                            +{transfer['xpts_gain']:.1f} xPts this GW
-                                        </span>
-                                        <span style="color:#5a6580;font-size:0.7rem;"> · {hit_str} ·
-                                            £{transfer['new_bank']/10:.1f}m ITB after
-                                        </span>
-                                    </div>""", unsafe_allow_html=True)
-                                else:
-                                    st.markdown(
-                                        "<div class='transfer-card'>"
-                                        "<span style='color:#8892a8;'>No transfer — bank the free transfer</span>"
-                                        "</div>",
-                                        unsafe_allow_html=True,
-                                    )
+                    if generate or st.session_state.get("plan_generated"):
+                        st.session_state["plan_generated"] = True
 
-                                # Best XI pitch view
-                                if xi is not None and len(xi) >= 11:
-                                    formation = get_formation_str(xi)
-                                    xi_total = xi["xpts_gw"].sum() if "xpts_gw" in xi.columns else 0
-                                    st.markdown(
-                                        f"<span style='color:#8892a8;font-size:0.78rem;'>"
-                                        f"Best XI: {formation} · Projected {xi_total:.1f} xPts</span>",
-                                        unsafe_allow_html=True,
-                                    )
+                        with st.spinner("Building 6-gameweek rolling plan..."):
+                            plan = build_rolling_plan(
+                                my_squad, df,
+                                bank=team_data["bank"],
+                                free_transfers=ft_available,
+                                purchase_prices=team_data.get("purchase_prices", {}),
+                                selling_prices_api=team_data.get("selling_prices_api", {}),
+                                xpts_map=xpts_map,
+                                planning_gw_id=planning_gw_id,
+                                n_gws=6,
+                                chip_schedule=chip_schedule,
+                            )
 
-                                    for pid_val, plabel in [(4, "FWD"), (3, "MID"), (2, "DEF"), (1, "GK")]:
-                                        pp = xi[xi["pos_id"] == pid_val]
-                                        if len(pp) > 0:
-                                            cols = st.columns(max(len(pp), 1))
-                                            for ci, (_, p) in enumerate(pp.iterrows()):
-                                                sc = f"pitch-shirt-{POS_MAP.get(p['pos_id'],'mid').lower()}"
-                                                gw_xpts = p.get("xpts_gw", 0)
-                                                with cols[ci]:
-                                                    st.markdown(f"""<div style="text-align:center;">
-                                                        <div class="pitch-shirt {sc}">{gw_xpts:.1f}</div>
-                                                        <div class="pitch-name">{p['name']}</div>
-                                                        <div class="pitch-price">£{p['price']:.1f}m</div>
-                                                    </div>""", unsafe_allow_html=True)
+                        st.markdown("")
 
-                                    if bench is not None and len(bench) > 0:
-                                        if is_bb:
-                                            bench_label = "💪 BENCH BOOST — all bench players score:"
-                                        else:
-                                            bench_label = "Bench:"
-                                        bench_names = ", ".join([
-                                            f"{r['name']} ({r.get('xpts_gw', 0):.1f})"
-                                            for _, r in bench.iterrows()
-                                        ])
+                        # Plan summary
+                        if plan:
+                            total_xpts = 0
+                            total_hits = 0
+                            total_transfers = 0
+                            for gw_e in plan:
+                                xi = gw_e.get("xi")
+                                if xi is not None and "xpts_gw" in xi.columns:
+                                    cap = gw_e.get("captain")
+                                    cap_mult = gw_e.get("captain_multiplier", 2)
+                                    xi_pts = xi["xpts_gw"].sum()
+                                    # Add captain bonus (extra x1 or x2)
+                                    if cap is not None:
+                                        cap_xpts = xpts_map.get(cap.get("id", 0), {}).get(gw_e["gw"], 0)
+                                        xi_pts += cap_xpts * (cap_mult - 1)
+                                    # Add bench if bench boost
+                                    if gw_e.get("bench_boost") and gw_e.get("bench") is not None:
+                                        xi_pts += gw_e["bench"]["xpts_gw"].sum() if "xpts_gw" in gw_e["bench"].columns else 0
+                                    total_xpts += xi_pts
+                                total_hits += gw_e.get("hit", 0)
+                                total_transfers += len(gw_e.get("transfers", []))
+
+                            sc1, sc2, sc3 = st.columns(3)
+                            with sc1:
+                                st.markdown(f"""<div class="metric-card">
+                                    <div class="metric-label">Projected Total (6GW)</div>
+                                    <div class="metric-value">{total_xpts:.0f} xPts</div>
+                                    <div class="metric-sub">After captain bonus</div>
+                                </div>""", unsafe_allow_html=True)
+                            with sc2:
+                                st.markdown(f"""<div class="metric-card">
+                                    <div class="metric-label">Transfers Planned</div>
+                                    <div class="metric-value">{total_transfers}</div>
+                                    <div class="metric-sub">{total_hits}pts in hits</div>
+                                </div>""", unsafe_allow_html=True)
+                            with sc3:
+                                chips_used = sum(1 for g in plan if g.get("chip"))
+                                st.markdown(f"""<div class="metric-card">
+                                    <div class="metric-label">Chips Used</div>
+                                    <div class="metric-value">{chips_used}</div>
+                                    <div class="metric-sub">of {len(chip_schedule)} planned</div>
+                                </div>""", unsafe_allow_html=True)
+
+                            st.markdown("")
+
+                            for gw_entry in plan:
+                                gw = gw_entry["gw"]
+                                transfer = gw_entry["transfer"]
+                                xi = gw_entry["xi"]
+                                bench = gw_entry["bench"]
+                                hit = gw_entry["hit"]
+                                chip = gw_entry.get("chip")
+                                captain = gw_entry.get("captain")
+                                cap_mult = gw_entry.get("captain_multiplier", 2)
+                                is_bb = gw_entry.get("bench_boost", False)
+
+                                # Expander label with chip badge
+                                chip_labels = {
+                                    "wildcard": "🃏 WILDCARD",
+                                    "free_hit": "⚡ FREE HIT",
+                                    "triple_captain": "👑 TRIPLE CAPTAIN",
+                                    "bench_boost": "💪 BENCH BOOST",
+                                }
+                                chip_str = f" — {chip_labels.get(chip, '')}" if chip else ""
+                                with st.expander(f"**Gameweek {gw}**{chip_str}", expanded=(gw == planning_gw_id)):
+
+                                    # Transfer / chip action
+                                    if chip == "wildcard":
+                                        squad_count = len(gw_entry.get("squad", []))
                                         st.markdown(
-                                            f"<span style='color:#5a6580;font-size:0.68rem;'>"
-                                            f"{'💪 ' if is_bb else ''}{bench_label} {bench_names}</span>",
+                                            f"<div class='transfer-card'>"
+                                            f"<span style='color:#a78bfa;font-weight:700;'>🃏 WILDCARD ACTIVE</span>"
+                                            f"<br><span style='color:#8892a8;font-size:0.72rem;'>"
+                                            f"Full squad rebuilt via MILP solver ({squad_count} players) — optimised for remaining GWs</span>"
+                                            f"</div>",
+                                            unsafe_allow_html=True,
+                                        )
+                                    elif chip == "free_hit":
+                                        st.markdown(
+                                            f"<div class='transfer-card'>"
+                                            f"<span style='color:#38bdf8;font-weight:700;'>⚡ FREE HIT ACTIVE</span>"
+                                            f"<br><span style='color:#8892a8;font-size:0.72rem;'>"
+                                            f"Best possible squad for this single GW — reverts to your team next week</span>"
+                                            f"</div>",
+                                            unsafe_allow_html=True,
+                                        )
+                                    else:
+                                        transfers_list = gw_entry.get("transfers", [])
+                                        gw_hit = gw_entry.get("hit", 0)
+                                        ft_used = gw_entry.get("ft_used", 0)
+                                        n_total = len(transfers_list)
+
+                                        if n_total > 0:
+                                            # Summary line
+                                            hit_parts = []
+                                            if ft_used > 0:
+                                                hit_parts.append(f"{ft_used} free")
+                                            paid = n_total - ft_used
+                                            if paid > 0:
+                                                hit_parts.append(f"{paid} hit (-{paid * 4}pts)")
+                                            summary = " + ".join(hit_parts)
+                                            total_gain = sum(t["xpts_gain"] for t in transfers_list)
+
+                                            st.markdown(
+                                                f"<span style='color:#8892a8;font-size:0.75rem;'>"
+                                                f"**{n_total} transfer{'s' if n_total > 1 else ''}** ({summary}) · "
+                                                f"Total xPts gain: <span style='color:#34d399;font-weight:600;'>+{total_gain:.1f}</span>"
+                                                f"{f' · Net after hit: +{total_gain - gw_hit:.1f}' if gw_hit > 0 else ''}"
+                                                f"</span>",
+                                                unsafe_allow_html=True,
+                                            )
+
+                                            for t_idx, t in enumerate(transfers_list):
+                                                o = t["out"]
+                                                i_p = t["in"]
+                                                sp = calculate_selling_price(
+                                                    o["id"], o["now_cost"],
+                                                    team_data.get("purchase_prices", {}),
+                                                    team_data.get("selling_prices_api", {})
+                                                )
+                                                is_free = (t_idx < ft_used)
+                                                tag = "Free" if is_free else "-4pt hit"
+                                                tag_color = "#34d399" if is_free else "#f87171"
+
+                                                st.markdown(f"""<div class="transfer-card">
+                                                    <span class="transfer-out">▼ {o['name']}</span>
+                                                    <span style="color:#5a6580;font-size:0.7rem;">
+                                                        {o.get('pos','?')} · {o.get('team','?')} · SP £{sp/10:.1f}m
+                                                    </span>
+                                                    &nbsp;<span class="transfer-arrow">→</span>&nbsp;
+                                                    <span class="transfer-in">▲ {i_p['name']}</span>
+                                                    <span style="color:#5a6580;font-size:0.7rem;">
+                                                        {i_p.get('pos','?')} · {i_p.get('team','?')} · £{i_p['now_cost']/10:.1f}m
+                                                    </span>
+                                                    <br>
+                                                    <span style="color:#34d399;font-size:0.72rem;font-weight:600;">
+                                                        +{t['xpts_gain']:.1f} xPts
+                                                    </span>
+                                                    <span style="color:{tag_color};font-size:0.7rem;font-weight:600;"> · {tag}</span>
+                                                    <span style="color:#5a6580;font-size:0.7rem;"> ·
+                                                        £{t['new_bank']/10:.1f}m ITB
+                                                    </span>
+                                                </div>""", unsafe_allow_html=True)
+                                        else:
+                                            st.markdown(
+                                                "<div class='transfer-card'>"
+                                                "<span style='color:#8892a8;'>No transfer — banking free transfer</span>"
+                                                "</div>",
+                                                unsafe_allow_html=True,
+                                            )
+                                    # Best XI pitch view
+                                    if xi is not None and len(xi) >= 11:
+                                        formation = get_formation_str(xi)
+                                        xi_total = xi["xpts_gw"].sum() if "xpts_gw" in xi.columns else 0
+                                        st.markdown(
+                                            f"<span style='color:#8892a8;font-size:0.78rem;'>"
+                                            f"Best XI: {formation} · Projected {xi_total:.1f} xPts</span>",
                                             unsafe_allow_html=True,
                                         )
 
-                                # Captain recommendation
-                                if captain is not None:
-                                    cap_xpts = xpts_map.get(captain.get("id", 0), {}).get(gw, 0)
-                                    cap_label = "Triple Captain" if cap_mult == 3 else "Captain"
-                                    cap_emoji = "👑" if cap_mult == 3 else "©️"
-                                    st.markdown(
-                                        f"<span style='color:#fbbf24;font-size:0.78rem;font-weight:600;'>"
-                                        f"{cap_emoji} {cap_label}: {captain.get('name', '?')} "
-                                        f"({cap_xpts:.1f} xPts × {cap_mult} = {cap_xpts * cap_mult:.1f})</span>",
-                                        unsafe_allow_html=True,
-                                    )
-                    else:
-                        st.info("Could not build a rolling plan — not enough fixture data.")
+                                        for pid_val, plabel in [(4, "FWD"), (3, "MID"), (2, "DEF"), (1, "GK")]:
+                                            pp = xi[xi["pos_id"] == pid_val]
+                                            if len(pp) > 0:
+                                                cols = st.columns(max(len(pp), 1))
+                                                for ci, (_, p) in enumerate(pp.iterrows()):
+                                                    sc = f"pitch-shirt-{POS_MAP.get(p['pos_id'],'mid').lower()}"
+                                                    gw_xpts = p.get("xpts_gw", 0)
+                                                    with cols[ci]:
+                                                        st.markdown(f"""<div style="text-align:center;">
+                                                            <div class="pitch-shirt {sc}">{gw_xpts:.1f}</div>
+                                                            <div class="pitch-name">{p['name']}</div>
+                                                            <div class="pitch-price">£{p['price']:.1f}m</div>
+                                                        </div>""", unsafe_allow_html=True)
+
+                                        if bench is not None and len(bench) > 0:
+                                            if is_bb:
+                                                bench_label = "💪 BENCH BOOST — all bench players score:"
+                                            else:
+                                                bench_label = "Bench:"
+                                            bench_names = ", ".join([
+                                                f"{r['name']} ({r.get('xpts_gw', 0):.1f})"
+                                                for _, r in bench.iterrows()
+                                            ])
+                                            st.markdown(
+                                                f"<span style='color:#5a6580;font-size:0.68rem;'>"
+                                                f"{'💪 ' if is_bb else ''}{bench_label} {bench_names}</span>",
+                                                unsafe_allow_html=True,
+                                            )
+
+                                    # Captain recommendation
+                                    if captain is not None:
+                                        cap_xpts = xpts_map.get(captain.get("id", 0), {}).get(gw, 0)
+                                        cap_label = "Triple Captain" if cap_mult == 3 else "Captain"
+                                        cap_emoji = "👑" if cap_mult == 3 else "©️"
+                                        st.markdown(
+                                            f"<span style='color:#fbbf24;font-size:0.78rem;font-weight:600;'>"
+                                            f"{cap_emoji} {cap_label}: {captain.get('name', '?')} "
+                                            f"({cap_xpts:.1f} xPts × {cap_mult} = {cap_xpts * cap_mult:.1f})</span>",
+                                            unsafe_allow_html=True,
+                                        )
+                        else:
+                            st.info("Could not build a rolling plan — not enough fixture data.")
 
                     # Full squad table
                     st.markdown("")
