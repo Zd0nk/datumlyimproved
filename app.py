@@ -302,27 +302,71 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id):
         pos = p["pos_id"]
         team_short = p["team"]
         mins = p["minutes"]
-        appearances = max(p.get("starts", 0), 1)
+        starts = max(p.get("starts", 0), 0)
+        total_gws_played = max(current_gw_id - 1, 1)  # GWs elapsed so far
 
-        # Playing probability
-        chance = p.get("chance_playing", 100)
-        if chance is None or pd.isna(chance):
-            chance = 100
-        play_prob = float(chance) / 100.0
-        if mins < 45:
-            play_prob *= 0.3
+        # ============================================================
+        # EXPECTED MINUTES MODEL
+        # ============================================================
+        # Key insight: a player's expected minutes next GW should be based on
+        # their actual average minutes per GW this season, not just a binary
+        # "available or not". This prevents fringe/youth players being inflated.
 
-        # Per-90 stats from FPL API
+        # Average minutes per GW this season
+        avg_mins_per_gw = mins / total_gws_played
+
+        # FPL's chance_of_playing (None = no news = likely available)
+        chance = p.get("chance_playing", None)
+        if chance is not None and not pd.isna(chance):
+            availability = float(chance) / 100.0
+        else:
+            # No news — availability based on recent playing pattern
+            if avg_mins_per_gw >= 60:
+                availability = 0.95  # regular starter
+            elif avg_mins_per_gw >= 30:
+                availability = 0.75  # rotation / sub risk
+            elif avg_mins_per_gw >= 10:
+                availability = 0.40  # mainly a sub
+            elif mins > 0:
+                availability = 0.15  # fringe player
+            else:
+                availability = 0.0   # hasn't played
+
+        # Expected minutes next GW (capped at 90)
+        # Blend: recent avg mins * availability
+        expected_mins = min(avg_mins_per_gw * availability, 90)
+
+        # Convert to "expected 90s" for scaling xG/xA
+        expected_90s = expected_mins / 90.0
+
+        # Playing probability (for appearance points — did they get on the pitch?)
+        play_prob = min(availability, 0.98)
+
+        # Full 60+ min probability (for clean sheet, appearance pts)
+        full_game_prob = expected_mins / 90.0 if expected_mins >= 45 else expected_mins / 180.0
+
+        # ============================================================
+        # PER-90 STATS (from FPL API xG/xA data)
+        # ============================================================
         mins_played = max(mins, 1)
-        nineties = mins_played / 90
+        nineties = mins_played / 90.0
         xg_per90 = float(p.get("xg_per90", 0) or 0)
         xa_per90 = float(p.get("xa_per90", 0) or 0)
 
-        # Fallback: use actual goals/assists if xG not available
-        if xg_per90 == 0 and p["goals"] > 0:
-            xg_per90 = p["goals"] / max(nineties, 0.5)
-        if xa_per90 == 0 and p["assists"] > 0:
-            xa_per90 = p["assists"] / max(nineties, 0.5)
+        # Fallback: use actual goals/assists per 90 ONLY if enough minutes
+        # to be a reliable sample (>= 270 mins = ~3 full games)
+        if xg_per90 == 0 and p["goals"] > 0 and mins >= 270:
+            xg_per90 = p["goals"] / nineties
+        if xa_per90 == 0 and p["assists"] > 0 and mins >= 270:
+            xa_per90 = p["assists"] / nineties
+
+        # Apply regression to the mean for low-sample players
+        # (fewer minutes = regress more towards position average)
+        sample_weight = min(nineties / 10.0, 1.0)  # full weight at 10+ 90s
+        pos_avg_xg = {1: 0.0, 2: 0.02, 3: 0.12, 4: 0.35}
+        pos_avg_xa = {1: 0.01, 2: 0.05, 3: 0.10, 4: 0.12}
+        xg_per90 = xg_per90 * sample_weight + pos_avg_xg.get(pos, 0.1) * (1 - sample_weight)
+        xa_per90 = xa_per90 * sample_weight + pos_avg_xa.get(pos, 0.08) * (1 - sample_weight)
 
         player_gw_xpts = {}
         fix_list = upcoming.get(p["team_id"], [])
@@ -364,29 +408,29 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id):
             # Calculate expected FPL points for this fixture
             xpts = 0.0
 
-            # Appearance points (if they play)
-            xpts += PTS_APPEARANCE * play_prob
+            # Appearance points (2 pts if 60+ mins, 1 pt if <60 mins)
+            xpts += 2.0 * full_game_prob + 1.0 * max(play_prob - full_game_prob, 0)
 
-            # Goal points
-            xpts += adj_xg * PTS_GOAL.get(pos, 4) * play_prob
+            # Goal points (scale by expected 90s played, not just binary)
+            xpts += adj_xg * expected_90s * PTS_GOAL.get(pos, 4)
 
             # Assist points
-            xpts += adj_xa * PTS_ASSIST * play_prob
+            xpts += adj_xa * expected_90s * PTS_ASSIST
 
-            # Clean sheet points (GK and DEF mainly)
-            xpts += cs_prob * PTS_CS.get(pos, 0) * play_prob
+            # Clean sheet points (GK and DEF mainly — need 60+ mins)
+            xpts += cs_prob * PTS_CS.get(pos, 0) * full_game_prob
 
-            # Bonus points estimate
+            # Bonus points estimate (proportional to involvement)
             xpts += PTS_BONUS_AVG * play_prob
 
-            # Goals conceded penalty for GK/DEF (approx)
+            # Goals conceded penalty for GK/DEF (approx -0.5 per goal after first)
             if pos in [1, 2]:
                 expected_conceded = league_avg_goals * opp_atk_str * home_boost
-                xpts -= max(0, (expected_conceded - 1)) * 0.5 * play_prob
+                xpts -= max(0, (expected_conceded - 1)) * 0.5 * full_game_prob
 
-            # Save points for GKs
+            # Save points for GKs (~1 pt per game on average)
             if pos == 1:
-                xpts += 1.0 * play_prob  # ~3 saves = 1 point on average
+                xpts += 1.0 * full_game_prob
 
             player_gw_xpts[gw] = round(max(xpts, 0), 2)
 
