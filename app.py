@@ -17,6 +17,7 @@ import streamlit as st
 import requests
 import pandas as pd
 import numpy as np
+import math
 from pulp import (
     LpProblem, LpMaximize, LpVariable, lpSum, LpStatus, value,
     PULP_CBC_CMD,
@@ -395,15 +396,42 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id):
             # Clean sheet probability
             opp_atk_str = opp_odds.get("attack_strength", 1.0)
             team_def_str = team_attack_odds.get("defence_strength", 1.0)
-            # Lower opponent attack + lower own conceding = higher CS prob
-            base_cs = 0.30  # league average ~30%
-            cs_prob = base_cs * (1.0 / max(opp_atk_str, 0.3)) * (1.0 / max(team_def_str, 0.3))
-            cs_prob = min(cs_prob, 0.65)  # cap at 65%
 
-            # Use odds-derived CS if available
+            # Base CS from odds — but factor in actual goals conceded this season
+            # A team conceding 1.8 goals/game should have much lower CS% than one conceding 0.8
+            actual_xgc_per90 = float(p.get("xgc_per90", 0) or 0)
+            if pos in [1, 2] and actual_xgc_per90 > 0:
+                # Use actual xGC as a strong signal for defensive quality
+                # Poisson approximation: P(0 goals) ≈ e^(-xGC)
+                base_cs = math.exp(-actual_xgc_per90 * opp_atk_str)
+            else:
+                # Fallback: odds-based estimate, penalised by opponent attack
+                base_cs = 0.30 * (1.0 / max(opp_atk_str, 0.5))
+                # Penalise teams that concede a lot (team_def_str > 1 = concede more)
+                base_cs *= (1.0 / max(team_def_str, 0.5))
+                base_cs = min(base_cs, 0.50)
+
+            # Blend with odds-derived CS if available (but don't override Poisson)
             team_cs_from_odds = team_attack_odds.get("cs_prob")
-            if team_cs_from_odds:
-                cs_prob = (cs_prob + team_cs_from_odds) / 2
+            if team_cs_from_odds and actual_xgc_per90 == 0:
+                cs_prob = (base_cs * 0.4 + team_cs_from_odds * 0.6)
+            else:
+                cs_prob = base_cs
+
+            # Hard cap — no team keeps a CS more than 50% of the time
+            cs_prob = min(cs_prob, 0.50)
+
+            # Apply recent form adjustment: if team has lost 3+ of last 5, reduce CS further
+            try:
+                team_form_list = p["team_form"] if "team_form" in p.index else []
+                if isinstance(team_form_list, list) and len(team_form_list) >= 3:
+                    recent_losses = sum(1 for r in team_form_list[:5] if r == "L")
+                    if recent_losses >= 3:
+                        cs_prob *= 0.6  # 40% penalty for bad recent form
+                    elif recent_losses >= 2:
+                        cs_prob *= 0.8  # 20% penalty
+            except (KeyError, TypeError):
+                pass
 
             # Calculate expected FPL points for this fixture
             xpts = 0.0
@@ -423,14 +451,21 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id):
             # Bonus points estimate (proportional to involvement)
             xpts += PTS_BONUS_AVG * play_prob
 
-            # Goals conceded penalty for GK/DEF (approx -0.5 per goal after first)
+            # Goals conceded penalty for GK/DEF
+            # FPL rule: -1 point per 2 goals conceded (i.e. -0.5 per goal) from goal 1
             if pos in [1, 2]:
-                expected_conceded = league_avg_goals * opp_atk_str * home_boost
-                xpts -= max(0, (expected_conceded - 1)) * 0.5 * full_game_prob
+                expected_conceded = league_avg_goals * opp_atk_str
+                if not fix["home"]:
+                    expected_conceded *= 1.1  # away teams concede slightly more
+                xpts -= expected_conceded * 0.5 * full_game_prob
 
-            # Save points for GKs (~1 pt per game on average)
+            # Save points for GKs: ~1pt per 3 saves
+            # Better estimate: GKs on bad teams face more shots but also concede more
+            # Average ~3.5 saves/game across PL, but scale by opponent attack
             if pos == 1:
-                xpts += 1.0 * full_game_prob
+                expected_saves = 3.5 * opp_atk_str * 0.7  # not all shots are saveable
+                save_points = (expected_saves / 3.0)  # 1 pt per 3 saves
+                xpts += save_points * full_game_prob
 
             player_gw_xpts[gw] = round(max(xpts, 0), 2)
 
