@@ -156,6 +156,123 @@ def load_betting_odds():
         return None, str(e)
 
 
+@st.cache_data(ttl=3600)
+def load_recent_gw_live_data(current_gw_id, n_recent=7):
+    """
+    Fetch per-GW live stats for the last N completed gameweeks.
+    Uses event/{gw}/live/ endpoint — one call per GW, returns all players.
+    Returns: dict {player_id: [{gw, minutes, xG, xA, xGC, goals, assists, ...}, ...]}
+    """
+    headers = {"User-Agent": "FPL-Optimizer/2.0"}
+    player_gw_data = {}
+
+    start_gw = max(1, current_gw_id - n_recent)
+    for gw in range(start_gw, current_gw_id):
+        try:
+            resp = requests.get(
+                f"{FPL_BASE}/event/{gw}/live/",
+                headers=headers, timeout=15,
+            )
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            elements = data.get("elements", [])
+            for el in elements:
+                pid = el["id"]
+                stats = el.get("stats", {})
+                if stats.get("minutes", 0) == 0:
+                    continue
+                if pid not in player_gw_data:
+                    player_gw_data[pid] = []
+                player_gw_data[pid].append({
+                    "gw": gw,
+                    "minutes": stats.get("minutes", 0),
+                    "goals": stats.get("goals_scored", 0),
+                    "assists": stats.get("assists", 0),
+                    "xG": float(stats.get("expected_goals", 0) or 0),
+                    "xA": float(stats.get("expected_assists", 0) or 0),
+                    "xGC": float(stats.get("expected_goals_conceded", 0) or 0),
+                    "xGI": float(stats.get("expected_goal_involvements", 0) or 0),
+                    "clean_sheets": stats.get("clean_sheets", 0),
+                    "bonus": stats.get("bonus", 0),
+                    "total_points": stats.get("total_points", 0),
+                })
+        except Exception:
+            continue
+
+    return player_gw_data
+
+
+def compute_form_weighted_xg(player_gw_data, n_recent=7):
+    """
+    Compute form-weighted xG/90 and xA/90 from recent GW data.
+    Uses exponential decay: most recent GW has highest weight.
+    Returns: dict {player_id: {xg_form_per90, xa_form_per90, xgc_form_per90, form_minutes}}
+    """
+    result = {}
+    decay_factor = 0.85  # each older GW is worth 85% of the next
+
+    for pid, gw_list in player_gw_data.items():
+        # Sort by GW descending (most recent first)
+        sorted_gws = sorted(gw_list, key=lambda x: x["gw"], reverse=True)[:n_recent]
+
+        if not sorted_gws:
+            continue
+
+        weighted_xg = 0
+        weighted_xa = 0
+        weighted_xgc = 0
+        weighted_mins = 0
+        total_weight = 0
+
+        for i, gw_data in enumerate(sorted_gws):
+            weight = decay_factor ** i  # most recent = 1.0, then 0.85, 0.72, 0.61...
+            mins = gw_data["minutes"]
+            if mins > 0:
+                weighted_xg += gw_data["xG"] * weight
+                weighted_xa += gw_data["xA"] * weight
+                weighted_xgc += gw_data["xGC"] * weight
+                weighted_mins += mins * weight
+                total_weight += weight
+
+        if weighted_mins > 0 and total_weight > 0:
+            nineties = weighted_mins / 90.0
+            result[pid] = {
+                "xg_form_per90": weighted_xg / nineties,
+                "xa_form_per90": weighted_xa / nineties,
+                "xgc_form_per90": weighted_xgc / nineties,
+                "form_minutes": weighted_mins / total_weight,  # avg weighted mins
+                "form_gws": len(sorted_gws),
+            }
+
+    return result
+
+
+def detect_blank_double_gws(fixtures, planning_gw_id, n_gws=6, teams=None):
+    """
+    Detect blank and double gameweeks from fixture data.
+    Returns: dict {team_id: {gw: fixture_count}} where 0 = blank, 2+ = double
+    """
+    if teams is None:
+        teams = {}
+
+    team_fixture_counts = {}
+    for t_id in teams:
+        team_fixture_counts[t_id] = {}
+        for gw in range(planning_gw_id, planning_gw_id + n_gws):
+            team_fixture_counts[t_id][gw] = 0
+
+    for f in fixtures:
+        ev = f.get("event")
+        if ev and planning_gw_id <= ev < planning_gw_id + n_gws:
+            if f["team_h"] in team_fixture_counts:
+                team_fixture_counts[f["team_h"]][ev] = team_fixture_counts[f["team_h"]].get(ev, 0) + 1
+            if f["team_a"] in team_fixture_counts:
+                team_fixture_counts[f["team_a"]][ev] = team_fixture_counts[f["team_a"]].get(ev, 0) + 1
+
+    return team_fixture_counts
+
+
 def odds_to_probabilities(odds_df, teams_map):
     """
     Convert betting odds to match probabilities per team.
@@ -258,7 +375,8 @@ TEAM_NAME_MAP = {
 }
 
 
-def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id):
+def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
+                     form_xg_data=None, team_fixture_counts=None):
     """
     Source 3: Custom expected points model.
 
@@ -347,23 +465,41 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id):
         full_game_prob = expected_mins / 90.0 if expected_mins >= 45 else expected_mins / 180.0
 
         # ============================================================
-        # PER-90 STATS (from FPL API xG/xA data)
+        # PER-90 STATS — blend season average with form-weighted recent
         # ============================================================
         mins_played = max(mins, 1)
         nineties = mins_played / 90.0
-        xg_per90 = float(p.get("xg_per90", 0) or 0)
-        xa_per90 = float(p.get("xa_per90", 0) or 0)
+
+        # Season-average xG/xA from FPL API
+        season_xg = float(p.get("xg_per90", 0) or 0)
+        season_xa = float(p.get("xa_per90", 0) or 0)
 
         # Fallback: use actual goals/assists per 90 ONLY if enough minutes
-        # to be a reliable sample (>= 270 mins = ~3 full games)
-        if xg_per90 == 0 and p["goals"] > 0 and mins >= 270:
-            xg_per90 = p["goals"] / nineties
-        if xa_per90 == 0 and p["assists"] > 0 and mins >= 270:
-            xa_per90 = p["assists"] / nineties
+        if season_xg == 0 and p["goals"] > 0 and mins >= 270:
+            season_xg = p["goals"] / nineties
+        if season_xa == 0 and p["assists"] > 0 and mins >= 270:
+            season_xa = p["assists"] / nineties
+
+        # Form-weighted xG/xA from recent 7 GWs (if available)
+        form_data = (form_xg_data or {}).get(pid)
+        if form_data and form_data.get("form_gws", 0) >= 3:
+            form_xg = form_data["xg_form_per90"]
+            form_xa = form_data["xa_form_per90"]
+            # Blend: 60% recent form, 40% season average
+            # (recent form is more predictive but noisier)
+            xg_per90 = form_xg * 0.6 + season_xg * 0.4
+            xa_per90 = form_xa * 0.6 + season_xa * 0.4
+        else:
+            xg_per90 = season_xg
+            xa_per90 = season_xa
+
+        # Also get form-weighted xGC for GKs/DEFs
+        form_xgc = None
+        if form_data and form_data.get("form_gws", 0) >= 3:
+            form_xgc = form_data.get("xgc_form_per90")
 
         # Apply regression to the mean for low-sample players
-        # (fewer minutes = regress more towards position average)
-        sample_weight = min(nineties / 10.0, 1.0)  # full weight at 10+ 90s
+        sample_weight = min(nineties / 10.0, 1.0)
         pos_avg_xg = {1: 0.0, 2: 0.02, 3: 0.12, 4: 0.35}
         pos_avg_xa = {1: 0.01, 2: 0.05, 3: 0.10, 4: 0.12}
         xg_per90 = xg_per90 * sample_weight + pos_avg_xg.get(pos, 0.1) * (1 - sample_weight)
@@ -397,9 +533,11 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id):
             opp_atk_str = opp_odds.get("attack_strength", 1.0)
             team_def_str = team_attack_odds.get("defence_strength", 1.0)
 
-            # Base CS from odds — but factor in actual goals conceded this season
-            # A team conceding 1.8 goals/game should have much lower CS% than one conceding 0.8
+            # Base CS from odds — use form-weighted xGC if available, else season
             actual_xgc_per90 = float(p.get("xgc_per90", 0) or 0)
+            if form_xgc is not None and form_xgc > 0:
+                # Blend form xGC with season xGC (form is more recent)
+                actual_xgc_per90 = form_xgc * 0.65 + actual_xgc_per90 * 0.35
             if pos in [1, 2] and actual_xgc_per90 > 0:
                 # Use actual xGC as a strong signal for defensive quality
                 # Poisson approximation: P(0 goals) ≈ e^(-xGC)
@@ -467,7 +605,22 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id):
                 save_points = (expected_saves / 3.0)  # 1 pt per 3 saves
                 xpts += save_points * full_game_prob
 
-            player_gw_xpts[gw] = round(max(xpts, 0), 2)
+            # Accumulate xPts — important for DGWs where a player has 2 fixtures in same GW
+            gw_xpts_so_far = player_gw_xpts.get(gw, 0)
+            player_gw_xpts[gw] = round(gw_xpts_so_far + max(xpts, 0), 2)
+
+        # Apply blank GW override
+        # Blank GW (0 fixtures) = 0 xPts — fixture loop won't have added anything,
+        # but we set explicitly to be safe.
+        # DGWs are already handled: the fixture loop processes both fixtures and
+        # accumulates xPts, so a DGW player naturally gets ~2x a single-GW player.
+        # This means DGW players only rank higher if their per-fixture xPts justify it.
+        if team_fixture_counts:
+            team_counts = team_fixture_counts.get(p["team_id"], {})
+            for gw in list(player_gw_xpts.keys()):
+                fixture_count = team_counts.get(gw, 1)
+                if fixture_count == 0:
+                    player_gw_xpts[gw] = 0.0
 
         # Total xPts over next 6 GWs
         xpts_all[pid] = player_gw_xpts
@@ -716,8 +869,17 @@ def enrich_data(bootstrap, fixtures, team_odds):
 
     df = pd.DataFrame(rows)
 
+    # Load form-weighted xG data from recent GWs
+    player_gw_data = load_recent_gw_live_data(gw_id, n_recent=7)
+    form_xg_data = compute_form_weighted_xg(player_gw_data, n_recent=7)
+
+    # Detect blank/double gameweeks
+    team_fixture_counts = detect_blank_double_gws(fixtures, gw_id, n_gws=6, teams=teams)
+
     # Build xPts model (uses planning_gw_id, so only future fixtures)
-    xpts_map = build_xpts_model(df, team_odds, teams, fixtures, gw_id)
+    xpts_map = build_xpts_model(df, team_odds, teams, fixtures, gw_id,
+                                 form_xg_data=form_xg_data,
+                                 team_fixture_counts=team_fixture_counts)
 
     # Add xPts columns
     # xpts_next_gw = xPts for the specific next gameweek (planning_gw_id)
@@ -739,7 +901,7 @@ def enrich_data(bootstrap, fixtures, team_odds):
         lambda r: round(r["xpts_total"] / max(r["price"], 1), 2), axis=1
     )
 
-    return df, teams, current_gw, planning_gw_id, upcoming, fixtures, xpts_map
+    return df, teams, current_gw, planning_gw_id, upcoming, fixtures, xpts_map, team_fixture_counts
 
 
 # ============================================================
@@ -1433,7 +1595,7 @@ def main():
     team_odds = odds_to_probabilities(odds_df, TEAM_NAME_MAP) if odds_df is not None else {}
 
     with st.spinner("Building xPts model & enriching data..."):
-        df, teams, current_gw, planning_gw_id, upcoming_map, fixtures_list, xpts_map = enrich_data(
+        df, teams, current_gw, planning_gw_id, upcoming_map, fixtures_list, xpts_map, team_fixture_counts = enrich_data(
             bootstrap, fixtures_raw, team_odds
         )
 
@@ -2129,10 +2291,14 @@ def main():
 
             for gw in gw_range:
                 fix = fm.get(t_id, {}).get(gw)
-                if fix:
+                fc = team_fixture_counts.get(t_id, {}).get(gw, 1)
+                if fc == 0:
+                    row[f"GW{gw}"] = "BLANK"
+                elif fix:
                     opp = teams.get(fix["opp"], {}).get("short_name", "???")
                     pre = "" if fix["home"] else "@"
-                    row[f"GW{gw}"] = f"{pre}{opp} ({fix['diff']})"
+                    dgw = " [DGW]" if fc >= 2 else ""
+                    row[f"GW{gw}"] = f"{pre}{opp} ({fix['diff']}){dgw}"
                     diffs.append(fix["diff"])
                 else:
                     row[f"GW{gw}"] = "-"
