@@ -1309,6 +1309,7 @@ def solve_free_hit_squad(all_players_df, xpts_map, gw_id, budget=1000):
         (all_players_df["status"].isin(["a", "d", ""]))
     ].copy()
     eligible["xpts_gw"] = eligible["id"].map(lambda pid: xpts_map.get(pid, {}).get(gw_id, 0))
+    # For Free Hit, only pick players who actually have a fixture this GW
     eligible = eligible[eligible["xpts_gw"] > 0].copy()
     eligible["xpts_gw"] = eligible["xpts_gw"].fillna(0)
     eligible["now_cost"] = eligible["now_cost"].fillna(0).astype(int)
@@ -1342,20 +1343,46 @@ def solve_free_hit_squad(all_players_df, xpts_map, gw_id, budget=1000):
     return eligible[eligible["id"].isin(sel)].copy()
 
 
-def solve_wildcard_squad(all_players_df, xpts_map, planning_gw, n_future, budget=1000):
-    """Wildcard: best 15-man squad for remaining xPts over multiple GWs."""
+def solve_wildcard_squad(all_players_df, xpts_map, planning_gw, n_future, budget=1000,
+                         team_fixture_counts=None):
+    """
+    Wildcard: best 15-man squad optimised for total xPts over remaining GWs,
+    WITH blank-awareness — ensures at least 11 players have a fixture in every GW.
+
+    This prevents the solver from picking 15 players from teams that blank in GW31
+    just because they have great fixtures in GWs 30, 32-35.
+    """
+    gw_range = list(range(planning_gw, planning_gw + n_future))
+
     eligible = all_players_df[
         (all_players_df["minutes"] > 45) &
         (all_players_df["status"].isin(["a", "d", ""]))
     ].copy()
+
+    # Calculate total xPts across horizon
     eligible["xpts_rem"] = eligible["id"].map(
-        lambda pid: sum(xpts_map.get(pid, {}).get(gw, 0) for gw in range(planning_gw, planning_gw + n_future))
+        lambda pid: sum(xpts_map.get(pid, {}).get(gw, 0) for gw in gw_range)
     )
     eligible = eligible[eligible["xpts_rem"] > 0].copy()
     eligible["xpts_rem"] = eligible["xpts_rem"].fillna(0)
     eligible["now_cost"] = eligible["now_cost"].fillna(0).astype(int)
     if len(eligible) < 15:
         return None
+
+    # Pre-compute which players have a fixture in each GW
+    # (a player has a fixture if their team has >= 1 fixture that GW)
+    player_has_fixture = {}  # {pid: {gw: bool}}
+    for _, p in eligible.iterrows():
+        pid = p["id"]
+        tid = p["team_id"]
+        player_has_fixture[pid] = {}
+        for gw in gw_range:
+            if team_fixture_counts:
+                fc = team_fixture_counts.get(tid, {}).get(gw, 1)
+                player_has_fixture[pid][gw] = (fc > 0)
+            else:
+                # No fixture count data — check if xPts > 0 as proxy
+                player_has_fixture[pid][gw] = (xpts_map.get(pid, {}).get(gw, 0) > 0)
 
     eligible = eligible.reset_index(drop=True)
     pid_map = {row["id"]: i for i, row in eligible.iterrows()}
@@ -1367,19 +1394,60 @@ def solve_wildcard_squad(all_players_df, xpts_map, planning_gw, n_future, budget
 
     prob = LpProblem("Wildcard", LpMaximize)
     x = {pid: LpVariable(f"wc_{pid}", cat="Binary") for pid in pids}
+
+    # Objective: maximise total xPts
     prob += lpSum(x[pid] * xv[pid_map[pid]] for pid in pids)
+
+    # Budget
     prob += lpSum(x[pid] * cv[pid_map[pid]] for pid in pids) <= budget
+
+    # Squad = 15
     prob += lpSum(x[pid] for pid in pids) == 15
+
+    # Position constraints
     for pos_id, cnt in [(1, 2), (2, 5), (3, 5), (4, 3)]:
         prob += lpSum(x[pid] for pid in pids if pv[pid_map[pid]] == pos_id) == cnt
+
+    # Max 3 per team
     for tid in set(tv):
         prob += lpSum(x[pid] for pid in pids if tv[pid_map[pid]] == tid) <= 3
+
+    # === BLANK GW CONSTRAINT ===
+    # For each GW in the horizon, at least 11 selected players must have a fixture.
+    # This prevents the solver from loading up on blanking teams.
+    for gw in gw_range:
+        playing_pids = [pid for pid in pids if player_has_fixture.get(pid, {}).get(gw, True)]
+        if playing_pids:
+            prob += lpSum(x[pid] for pid in playing_pids) >= 11
+
     try:
-        prob.solve(PULP_CBC_CMD(msg=0, timeLimit=30))
+        prob.solve(PULP_CBC_CMD(msg=0, timeLimit=45))
     except Exception:
         return None
     if LpStatus[prob.status] != "Optimal":
-        return None
+        # If infeasible with 11-player constraint (e.g. massive blank), try 8
+        prob2 = LpProblem("Wildcard_relaxed", LpMaximize)
+        x2 = {pid: LpVariable(f"wc2_{pid}", cat="Binary") for pid in pids}
+        prob2 += lpSum(x2[pid] * xv[pid_map[pid]] for pid in pids)
+        prob2 += lpSum(x2[pid] * cv[pid_map[pid]] for pid in pids) <= budget
+        prob2 += lpSum(x2[pid] for pid in pids) == 15
+        for pos_id, cnt in [(1, 2), (2, 5), (3, 5), (4, 3)]:
+            prob2 += lpSum(x2[pid] for pid in pids if pv[pid_map[pid]] == pos_id) == cnt
+        for tid in set(tv):
+            prob2 += lpSum(x2[pid] for pid in pids if tv[pid_map[pid]] == tid) <= 3
+        for gw in gw_range:
+            playing_pids = [pid for pid in pids if player_has_fixture.get(pid, {}).get(gw, True)]
+            if playing_pids:
+                prob2 += lpSum(x2[pid] for pid in playing_pids) >= 8
+        try:
+            prob2.solve(PULP_CBC_CMD(msg=0, timeLimit=45))
+        except Exception:
+            return None
+        if LpStatus[prob2.status] != "Optimal":
+            return None
+        sel = [pid for pid in pids if value(x2[pid]) is not None and value(x2[pid]) > 0.5]
+        return eligible[eligible["id"].isin(sel)].copy()
+
     sel = [pid for pid in pids if value(x[pid]) is not None and value(x[pid]) > 0.5]
     return eligible[eligible["id"].isin(sel)].copy()
 
@@ -1395,7 +1463,8 @@ def find_best_captain(squad_df, xpts_map, gw_id):
 
 def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
                        purchase_prices, selling_prices_api, xpts_map,
-                       planning_gw_id, n_gws=6, chip_schedule=None):
+                       planning_gw_id, n_gws=6, chip_schedule=None,
+                       team_fixture_counts=None):
     """
     Chip-aware rolling planner.
     chip_schedule: {gw_id: chip_name} e.g. {31: "wildcard", 33: "bench_boost"}
@@ -1451,7 +1520,8 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
         # === WILDCARD ===
         if chip == "wildcard":
             total_val = int(current_bank + current_squad["now_cost"].sum())
-            wc_squad = solve_wildcard_squad(all_players_df, xpts_map, gw, n_gws - i, total_val)
+            wc_squad = solve_wildcard_squad(all_players_df, xpts_map, gw, n_gws - i, total_val,
+                                               team_fixture_counts=team_fixture_counts)
             if wc_squad is not None:
                 current_squad = wc_squad
                 gw_entry["squad"] = wc_squad
@@ -1811,6 +1881,7 @@ def main():
                                 planning_gw_id=planning_gw_id,
                                 n_gws=6,
                                 chip_schedule=chip_schedule,
+                                team_fixture_counts=team_fixture_counts,
                             )
 
                         st.markdown("")
