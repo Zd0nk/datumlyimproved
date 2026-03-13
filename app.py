@@ -31,8 +31,8 @@ warnings.filterwarnings("ignore")
 # PAGE CONFIG
 # ============================================================
 st.set_page_config(
-    page_title="FPL Optimizer",
-    page_icon="⚽",
+    page_title="Datumly — FPL Intelligence",
+    page_icon="📊",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -41,6 +41,8 @@ FPL_BASE = "https://fantasy.premierleague.com/api"
 FOOTBALL_DATA_URL = "https://www.football-data.co.uk/mmz4281/2526/E0.csv"
 
 POS_MAP = {1: "GKP", 2: "DEF", 3: "MID", 4: "FWD"}
+
+DATUMLY_LOGO_B64 = "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"
 POS_FULL = {1: "Goalkeeper", 2: "Defender", 3: "Midfielder", 4: "Forward"}
 
 # FPL points system constants
@@ -59,7 +61,7 @@ st.markdown("""
     header[data-testid="stHeader"] { background-color: rgba(10,14,23,0.9); backdrop-filter: blur(10px); }
 
     .main-title {
-        background: linear-gradient(135deg, #38bdf8, #818cf8, #a78bfa);
+        background: linear-gradient(135deg, #f02d6e, #e8456e, #ff6b8a);
         -webkit-background-clip: text; -webkit-text-fill-color: transparent;
         font-size: 2.2rem; font-weight: 800; letter-spacing: -1px; margin-bottom: 0;
     }
@@ -92,7 +94,7 @@ st.markdown("""
         padding: 0.65rem 1.1rem; display: flex; align-items: center; gap: 1rem;
         margin-bottom: 1rem; flex-wrap: wrap;
     }
-    .gw-num { background: linear-gradient(135deg,#38bdf8,#818cf8); -webkit-background-clip: text; -webkit-text-fill-color: transparent; font-size: 1.05rem; font-weight: 700; }
+    .gw-num { background: linear-gradient(135deg,#f02d6e,#ff6b8a); -webkit-background-clip: text; -webkit-text-fill-color: transparent; font-size: 1.05rem; font-weight: 700; }
     .gw-deadline { color: #8892a8; font-size: 0.78rem; }
 
     .badge { font-size:0.65rem; padding:3px 9px; border-radius:6px; font-weight:600; }
@@ -1244,15 +1246,28 @@ def solve_best_xi_for_gw(squad_df, xpts_map, gw_id):
 
 def find_best_single_transfer_for_gw(squad_df, all_players_df, bank,
                                       purchase_prices, selling_prices_api,
-                                      xpts_map, gw_id, exclude_ids=None):
-    """Find the single best transfer specifically for one gameweek's xPts.
-    exclude_ids: set of player IDs to exclude from candidates (e.g. just sold)
+                                      xpts_map, gw_id, exclude_ids=None,
+                                      horizon_end=None):
+    """
+    Find the single best transfer considering the REMAINING HORIZON.
+    
+    For a GW31 transfer with horizon ending at GW35:
+    - Compare players on sum(xPts from GW31 to GW35), not just GW31
+    - This ensures transfers are forward-looking, not myopic
+    
+    Also returns the single-GW gain for display purposes.
     """
     if squad_df is None or len(squad_df) == 0:
         return None
 
     if exclude_ids is None:
         exclude_ids = set()
+    
+    # Default horizon: 6 GWs from this GW
+    if horizon_end is None:
+        horizon_end = gw_id + 6
+    
+    horizon_gws = list(range(gw_id, horizon_end))
 
     squad_ids = set(squad_df["id"].tolist()) | exclude_ids
     available = all_players_df[
@@ -1261,8 +1276,16 @@ def find_best_single_transfer_for_gw(squad_df, all_players_df, bank,
         (all_players_df["status"].isin(["a", "d", ""]))
     ].copy()
 
-    # Add per-GW xPts
+    # Remaining horizon xPts (what matters for the transfer decision)
     squad_df = squad_df.copy()
+    squad_df["xpts_horizon"] = squad_df["id"].map(
+        lambda pid: sum(xpts_map.get(pid, {}).get(gw, 0) for gw in horizon_gws)
+    )
+    available["xpts_horizon"] = available["id"].map(
+        lambda pid: sum(xpts_map.get(pid, {}).get(gw, 0) for gw in horizon_gws)
+    )
+    
+    # Also get single-GW xPts for display
     squad_df["xpts_gw"] = squad_df["id"].map(lambda pid: xpts_map.get(pid, {}).get(gw_id, 0))
     available["xpts_gw"] = available["id"].map(lambda pid: xpts_map.get(pid, {}).get(gw_id, 0))
 
@@ -1272,7 +1295,7 @@ def find_best_single_transfer_for_gw(squad_df, all_players_df, bank,
     )
 
     best = None
-    best_gain = -999  # allow any positive gain
+    best_gain = -999
 
     for _, out_p in squad_df.iterrows():
         budget_avail = bank + out_p["sell_price"]
@@ -1288,14 +1311,18 @@ def find_best_single_transfer_for_gw(squad_df, all_players_df, bank,
         if len(cands) == 0:
             continue
 
-        top = cands.loc[cands["xpts_gw"].idxmax()]
-        gain = top["xpts_gw"] - out_p["xpts_gw"]
-        if gain > best_gain and gain > 0.05:  # very low threshold — let the caller decide
-            best_gain = gain
+        # Pick best by HORIZON xPts, not single GW
+        top = cands.loc[cands["xpts_horizon"].idxmax()]
+        horizon_gain = top["xpts_horizon"] - out_p["xpts_horizon"]
+        gw_gain = top["xpts_gw"] - out_p["xpts_gw"]
+        
+        if horizon_gain > best_gain and horizon_gain > 0.05:
+            best_gain = horizon_gain
             best = {
                 "out": out_p.to_dict(),
                 "in": top.to_dict(),
-                "xpts_gain": round(gain, 2),
+                "xpts_gain": round(horizon_gain, 2),  # horizon gain for decision-making
+                "xpts_gw_gain": round(gw_gain, 2),     # single GW gain for display
                 "new_bank": int(budget_avail - top["now_cost"]),
             }
 
@@ -1541,15 +1568,20 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
         transfers_made = []
         transfers_ft_used = 0
         total_hit = 0
-        recently_sold = set()  # track sold players so we don't suggest buying them back
+        recently_sold = set()
+
+        # The horizon shrinks as we move through GWs:
+        # GW30 transfer considers GW30-35, GW31 considers GW31-35, etc.
+        horizon_end = planning_gw_id + n_gws
 
         # Keep finding improving transfers until no more gains
-        max_transfers = min(current_ft + 3, 8)  # allow up to 3 hits beyond FTs, cap at 8
+        max_transfers = min(current_ft + 3, 8)
         for t_num in range(max_transfers):
             transfer = find_best_single_transfer_for_gw(
                 current_squad, all_players_df, current_bank,
                 current_purchase, current_selling, xpts_map, gw,
                 exclude_ids=recently_sold,
+                horizon_end=horizon_end,
             )
 
             if transfer is None:
@@ -1567,7 +1599,7 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
                     break  # negligible gain, not worth the effort
             else:
                 net_gain = transfer["xpts_gain"] - hit_cost
-                if net_gain < 0.5:
+                if net_gain < 0.25:
                     break  # hit not worth it
                 total_hit += hit_cost
 
@@ -1638,10 +1670,16 @@ def render_fdr(upcoming, teams):
 # ============================================================
 
 def main():
-    st.markdown('<div class="main-title">⚽ FPL Optimizer</div>', unsafe_allow_html=True)
+    # Header with logo
+    st.markdown(
+        f'<div style="display:flex; align-items:center; gap:1rem; margin-bottom:0.5rem;">'
+        f'<img src="data:image/png;base64,{DATUMLY_LOGO_B64}" style="height:60px;" />'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
     st.markdown(
         '<div class="sub-title">'
-        'MILP-optimised squad selection · FPL API + Betting Odds + Custom xPts Model'
+        'Data-driven FPL intelligence · xG · xA · CS% · xPts · FDR'
         '</div>',
         unsafe_allow_html=True,
     )
@@ -1992,7 +2030,7 @@ def main():
                                             st.markdown(
                                                 f"<span style='color:#8892a8;font-size:0.75rem;'>"
                                                 f"**{n_total} transfer{'s' if n_total > 1 else ''}** ({summary}) · "
-                                                f"Total xPts gain: <span style='color:#34d399;font-weight:600;'>+{total_gain:.1f}</span>"
+                                                f"Horizon xPts gain: <span style='color:#34d399;font-weight:600;'>+{total_gain:.1f}</span>"
                                                 f"{f' · Net after hit: +{total_gain - gw_hit:.1f}' if gw_hit > 0 else ''}"
                                                 f"</span>",
                                                 unsafe_allow_html=True,
@@ -2009,6 +2047,7 @@ def main():
                                                 is_free = (t_idx < ft_used)
                                                 tag = "Free" if is_free else "-4pt hit"
                                                 tag_color = "#34d399" if is_free else "#f87171"
+                                                gw_gain_str = f" · This GW: +{t.get('xpts_gw_gain', 0):.1f}" if "xpts_gw_gain" in t else ""
 
                                                 st.markdown(f"""<div class="transfer-card">
                                                     <span class="transfer-out">▼ {o['name']}</span>
@@ -2022,7 +2061,7 @@ def main():
                                                     </span>
                                                     <br>
                                                     <span style="color:#34d399;font-size:0.72rem;font-weight:600;">
-                                                        +{t['xpts_gain']:.1f} xPts
+                                                        +{t['xpts_gain']:.1f} xPts remaining horizon{gw_gain_str}
                                                     </span>
                                                     <span style="color:{tag_color};font-size:0.7rem;font-weight:600;"> · {tag}</span>
                                                     <span style="color:#5a6580;font-size:0.7rem;"> ·
@@ -2394,8 +2433,9 @@ def main():
     st.markdown("---")
     st.markdown(
         f"<div style='text-align:center; color:#5a6580; font-size:0.7rem;'>"
-        f"Data: FPL API + football-data.co.uk odds · Solver: PuLP (MILP) · "
-        f"Cached 1hr · {datetime.now().strftime('%d %b %Y, %H:%M')}"
+        f"Datumly · Data-driven FPL intelligence · "
+        f"FPL API + football-data.co.uk + PuLP MILP · "
+        f"{datetime.now().strftime('%d %b %Y, %H:%M')}"
         f"</div>",
         unsafe_allow_html=True,
     )
