@@ -1575,7 +1575,8 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
         horizon_end = planning_gw_id + n_gws
 
         # Keep finding improving transfers until no more gains
-        max_transfers = min(current_ft + 3, 8)
+        # Cap at FTs + 2 hits max (so worst case is -8, never -12 or more)
+        max_transfers = min(current_ft + 2, 7)
         for t_num in range(max_transfers):
             transfer = find_best_single_transfer_for_gw(
                 current_squad, all_players_df, current_bank,
@@ -1589,19 +1590,23 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
 
             # Is this a free transfer or a hit?
             is_free = (t_num < current_ft)
-            hit_cost = 0 if is_free else 4
+            hit_number = t_num - current_ft + 1 if not is_free else 0  # 1st hit, 2nd hit, etc.
 
             # Decision thresholds:
-            # Free transfers: make if ANY positive gain (even 0.1 xPts — it's free!)
-            # Hits: only make if gain clearly exceeds 4pt cost
+            # Free transfers: make if ANY positive gain (it's free!)
+            # Hits: escalating threshold — each additional hit needs MORE justification
+            #   1st hit (-4): needs horizon gain > 6.0 (50% safety margin on the 4pt cost)
+            #   2nd hit (-8 cumulative): needs horizon gain > 8.0
+            #   3rd hit (-12 cumulative): needs horizon gain > 10.0 (very rarely worth it)
+            # This accounts for model uncertainty and diminishing returns
             if is_free:
                 if transfer["xpts_gain"] < 0.05:
-                    break  # negligible gain, not worth the effort
+                    break  # negligible gain
             else:
-                net_gain = transfer["xpts_gain"] - hit_cost
-                if net_gain < 0.5:
-                    break  # hit not worth it
-                total_hit += hit_cost
+                hit_threshold = 4.0 + (hit_number * 2.0)  # 6.0, 8.0, 10.0, 12.0...
+                if transfer["xpts_gain"] < hit_threshold:
+                    break  # not enough gain to justify this hit
+                total_hit += 4
 
             # Apply transfer
             transfers_made.append(transfer)
@@ -1672,20 +1677,23 @@ def render_fdr(upcoming, teams):
 def main():
     # Header with logo
     st.markdown(
-        f'<div style="display:flex; align-items:center; gap:1rem; margin-bottom:0.5rem;">'
+        f'<div style="margin-bottom:0.5rem;">'
         f'<img src="data:image/png;base64,{DATUMLY_LOGO_B64}" style="height:120px;" />'
         f'</div>',
         unsafe_allow_html=True,
     )
-    st.markdown(
-        '<div class="sub-title">'
-        'Data-driven FPL intelligence · xG · xA · CS% · xPts · FDR'
-        '</div>',
-        unsafe_allow_html=True,
-    )
     st.markdown("")
 
+    # === Refresh button ===
+    col_refresh, col_spacer = st.columns([1, 5])
+    with col_refresh:
+        if st.button("🔄 Refresh Data"):
+            st.cache_data.clear()
+            st.rerun()
+
     # === Load data ===
+    fetch_time = datetime.now()
+
     with st.spinner("Loading FPL API data..."):
         bootstrap, fixtures_raw, fpl_err = load_fpl_data()
 
@@ -1718,7 +1726,10 @@ def main():
             <span class="gw-deadline">Deadline: {deadline.strftime('%a %d %b, %H:%M')}</span>
             <span class="badge {bc}">{status}</span>
             {f'<span class="badge badge-blue">{planning_str}</span>' if planning_str else ''}
-            <span style="color:#5a6580; font-size:0.7rem;">Odds: {odds_status} · {len(team_odds)} teams matched</span>
+            <span style="color:#5a6580; font-size:0.68rem;">
+                Odds: {odds_status} · {len(team_odds)} teams ·
+                Data as of {fetch_time.strftime('%d %b %H:%M')} (cached 1hr)
+            </span>
         </div>""", unsafe_allow_html=True)
 
     # === Tabs ===
