@@ -158,6 +158,43 @@ def load_betting_odds():
         return None, str(e)
 
 
+@st.cache_data(ttl=7200)
+def load_club_elo():
+    """Source 3: Club Elo ratings — dynamic team strength from clubelo.com."""
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
+        resp = requests.get(f"http://api.clubelo.com/{today}", timeout=15)
+        if resp.status_code != 200:
+            return None, f"HTTP {resp.status_code}"
+        df = pd.read_csv(StringIO(resp.text), sep=",")
+        if len(df) == 0:
+            return None, "Empty response"
+        # Filter to English teams only (Country == ENG, Level 1)
+        eng = df[(df["Country"] == "ENG") & (df["Level"] == 1)].copy()
+        # Build lookup: club name -> Elo rating
+        elo_map = {}
+        for _, row in eng.iterrows():
+            elo_map[row["Club"]] = float(row["Elo"])
+        return elo_map, None
+    except Exception as e:
+        return None, str(e)
+
+
+# Club Elo name -> FPL short name mapping
+ELO_NAME_MAP = {
+    "Arsenal": "ARS", "Aston Villa": "AVL", "Bournemouth": "BOU",
+    "Brentford": "BRE", "Brighton": "BHA", "Chelsea": "CHE",
+    "Crystal Palace": "CRY", "Everton": "EVE", "Fulham": "FUL",
+    "Ipswich": "IPS", "Leicester": "LEI", "Liverpool": "LIV",
+    "Man City": "MCI", "Man United": "MUN", "Newcastle": "NEW",
+    "Nottingham Forest": "NFO", "Southampton": "SOU", "Tottenham": "TOT",
+    "West Ham": "WHU", "Wolves": "WOL",
+    "Leeds": "LEE", "Burnley": "BUR", "Sunderland": "SUN",
+    "Sheffield United": "SHU", "Norwich": "NOR",
+    "Middlesbrough": "MID", "Luton": "LUT",
+}
+
+
 @st.cache_data(ttl=3600)
 def load_recent_gw_live_data(current_gw_id, n_recent=7):
     """
@@ -378,7 +415,7 @@ TEAM_NAME_MAP = {
 
 
 def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
-                     form_xg_data=None, team_fixture_counts=None):
+                     form_xg_data=None, team_fixture_counts=None, elo_ratings=None):
     """
     Source 3: Custom expected points model.
 
@@ -395,6 +432,19 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
     for odds_name, fpl_short in TEAM_NAME_MAP.items():
         if odds_name in team_odds:
             odds_by_fpl[fpl_short] = team_odds[odds_name]
+
+    # Build FPL short_name -> Elo rating mapping
+    elo_by_fpl = {}
+    if elo_ratings:
+        for elo_name, fpl_short in ELO_NAME_MAP.items():
+            if elo_name in elo_ratings:
+                elo_by_fpl[fpl_short] = elo_ratings[elo_name]
+
+    # League average Elo (for normalisation)
+    if elo_by_fpl:
+        avg_elo = np.mean(list(elo_by_fpl.values()))
+    else:
+        avg_elo = 1600  # default PL average
 
     # Build opponent map per team per GW
     upcoming = {}  # team_id -> [{gw, opp_id, home, difficulty}]
@@ -507,6 +557,59 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
         xg_per90 = xg_per90 * sample_weight + pos_avg_xg.get(pos, 0.1) * (1 - sample_weight)
         xa_per90 = xa_per90 * sample_weight + pos_avg_xa.get(pos, 0.08) * (1 - sample_weight)
 
+        # ============================================================
+        # OVER/UNDERPERFORMANCE REGRESSION
+        # ============================================================
+        # If a player has scored significantly more/fewer goals than their xG,
+        # they're likely to regress. Adjust xG towards actual performance mean.
+        # E.g., player with 12 goals from 8.0 xG is overperforming — reduce projected xG
+        xg_total = float(p.get("xg_total", 0) or 0)
+        actual_goals = p["goals"]
+        if xg_total > 0 and nineties >= 5:
+            overperformance = (actual_goals - xg_total) / max(nineties, 1)  # per 90
+            # Apply 30% regression towards xG (don't fully regress — some players are genuinely clinical)
+            regression_factor = 0.30
+            xg_per90 -= overperformance * regression_factor
+
+        xa_total = float(p.get("xa_total", 0) or 0)
+        actual_assists = p["assists"]
+        if xa_total > 0 and nineties >= 5:
+            xa_overperf = (actual_assists - xa_total) / max(nineties, 1)
+            xa_per90 -= xa_overperf * 0.25  # assists regress less aggressively
+
+        # Floor at 0
+        xg_per90 = max(xg_per90, 0)
+        xa_per90 = max(xa_per90, 0)
+
+        # ============================================================
+        # SET PIECE TAKER BONUS
+        # ============================================================
+        # Penalty takers get a significant xG boost (~0.76 xG per pen, ~5-6 pens/season)
+        # Corner/FK takers get an xA boost (more delivery opportunities)
+        pen_order = int(p.get("penalties_order", 0) or 0)
+        corner_order = int(p.get("corners_order", 0) or 0)
+        fk_order = int(p.get("freekicks_order", 0) or 0)
+
+        pen_xg_boost = 0.0
+        set_piece_xa_boost = 0.0
+
+        if pen_order == 1:
+            # First-choice penalty taker: ~0.05 xG/90 boost (roughly 5 pens/season)
+            pen_xg_boost = 0.05
+        elif pen_order == 2:
+            pen_xg_boost = 0.015  # backup pen taker, occasional
+
+        if corner_order == 1:
+            # First-choice corner taker: ~0.03 xA/90 boost
+            set_piece_xa_boost += 0.03
+        if fk_order == 1:
+            # First-choice FK taker: ~0.02 xA/90 boost (+ small xG from direct FKs)
+            set_piece_xa_boost += 0.02
+            xg_per90 += 0.01  # direct FK goal threat
+
+        xg_per90 += pen_xg_boost
+        xa_per90 += set_piece_xa_boost
+
         player_gw_xpts = {}
         fix_list = upcoming.get(p["team_id"], [])
 
@@ -519,9 +622,29 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
             opp_odds = odds_by_fpl.get(opp_short, {})
             team_attack_odds = odds_by_fpl.get(team_short, {})
 
-            # Adjust xG based on opponent defence strength
-            opp_def_str = opp_odds.get("defence_strength", 1.0)
-            team_atk_str = team_attack_odds.get("attack_strength", 1.0)
+            # Get Elo ratings for both teams
+            team_elo = elo_by_fpl.get(team_short, avg_elo)
+            opp_elo = elo_by_fpl.get(opp_short, avg_elo)
+
+            # Elo-derived strength (normalised: 1.0 = average)
+            # Higher Elo = stronger team
+            team_elo_str = team_elo / avg_elo if avg_elo > 0 else 1.0
+            opp_elo_str = opp_elo / avg_elo if avg_elo > 0 else 1.0
+
+            # Blend odds-based and Elo-based opponent strength
+            # Elo is more dynamic (updates after every match), odds are market-informed
+            opp_def_str_odds = opp_odds.get("defence_strength", 1.0)
+            team_atk_str_odds = team_attack_odds.get("attack_strength", 1.0)
+
+            # If we have Elo data, blend 50/50 with odds; otherwise use odds only
+            if elo_by_fpl:
+                # Elo attack proxy: team_elo_str (strong team scores more)
+                # Elo defence proxy: 1/opp_elo_str (weak opponent concedes more)
+                opp_def_str = (opp_def_str_odds * 0.5) + ((1.0 / max(opp_elo_str, 0.5)) * 0.5)
+                team_atk_str = (team_atk_str_odds * 0.5) + (team_elo_str * 0.5)
+            else:
+                opp_def_str = opp_def_str_odds
+                team_atk_str = team_atk_str_odds
 
             # Scale factor: easier opponent = higher xG
             # opp_def_str > 1 means they concede more → easier
@@ -858,6 +981,13 @@ def enrich_data(bootstrap, fixtures, team_odds):
             "xa_per90": float(p.get("expected_assists_per_90", 0) or 0),
             "xgi_per90": float(p.get("expected_goal_involvements_per_90", 0) or 0),
             "xgc_per90": float(p.get("expected_goals_conceded_per_90", 0) or 0),
+            # Season totals for over/underperformance regression
+            "xg_total": float(p.get("expected_goals", 0) or 0),
+            "xa_total": float(p.get("expected_assists", 0) or 0),
+            # Set piece taker status (1 = first choice, None/0 = not)
+            "penalties_order": p.get("penalties_order") or 0,
+            "corners_order": p.get("corners_and_indirect_freekicks_order") or 0,
+            "freekicks_order": p.get("direct_freekicks_order") or 0,
             "selected_pct": float(p.get("selected_by_percent", 0) or 0),
             "transfers_in": p.get("transfers_in_event", 0) or 0,
             "transfers_out": p.get("transfers_out_event", 0) or 0,
@@ -878,10 +1008,14 @@ def enrich_data(bootstrap, fixtures, team_odds):
     # Detect blank/double gameweeks
     team_fixture_counts = detect_blank_double_gws(fixtures, gw_id, n_gws=6, teams=teams)
 
+    # Load Club Elo ratings
+    elo_ratings, elo_err = load_club_elo()
+
     # Build xPts model (uses planning_gw_id, so only future fixtures)
     xpts_map = build_xpts_model(df, team_odds, teams, fixtures, gw_id,
                                  form_xg_data=form_xg_data,
-                                 team_fixture_counts=team_fixture_counts)
+                                 team_fixture_counts=team_fixture_counts,
+                                 elo_ratings=elo_ratings)
 
     # Add xPts columns
     # xpts_next_gw = xPts for the specific next gameweek (planning_gw_id)
@@ -1710,6 +1844,10 @@ def main():
     odds_status = "✅ Loaded" if odds_df is not None else f"⚠️ {odds_err or 'Unavailable'}"
     team_odds = odds_to_probabilities(odds_df, TEAM_NAME_MAP) if odds_df is not None else {}
 
+    # Check Elo status (loaded inside enrich_data but we check here for display)
+    elo_check, elo_check_err = load_club_elo()
+    elo_status = f"✅ {len(elo_check)} teams" if elo_check else f"⚠️ {elo_check_err or 'Unavailable'}"
+
     with st.spinner("Building xPts model & enriching data..."):
         df, teams, current_gw, planning_gw_id, upcoming_map, fixtures_list, xpts_map, team_fixture_counts = enrich_data(
             bootstrap, fixtures_raw, team_odds
@@ -1727,8 +1865,8 @@ def main():
             <span class="badge {bc}">{status}</span>
             {f'<span class="badge badge-blue">{planning_str}</span>' if planning_str else ''}
             <span style="color:#5a6580; font-size:0.68rem;">
-                Odds: {odds_status} · {len(team_odds)} teams ·
-                Data as of {fetch_time.strftime('%d %b %H:%M')} (cached 1hr)
+                Odds: {odds_status} · Elo: {elo_status} ·
+                {fetch_time.strftime('%d %b %H:%M')} (cached 1hr)
             </span>
         </div>""", unsafe_allow_html=True)
 
