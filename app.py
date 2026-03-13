@@ -1,16 +1,19 @@
 """
-FPL Optimizer v2 — Proper Architecture
+Datumly — Data-driven FPL Intelligence
 =======================================
 Data sources:
-  1. FPL API (bootstrap-static, fixtures) — player stats, prices, xG/xA, form
+  1. FPL API (bootstrap-static, fixtures, live GW) — player stats, prices, xG/xA, form, set pieces
   2. football-data.co.uk — betting odds → match probabilities
-  3. Custom xPts model — blends FPL xG/xA + odds-derived team strength + form
+  3. Club Elo (api.clubelo.com) — dynamic team strength ratings
+  4. Understat (understat.com) — independent neural-network xG model (npxG, xA, xGChain, xGBuildup)
+  5. Custom xPts model — blends all sources + form-weighting + over/underperformance regression
 
 Optimisation:
   - PuLP MILP solver for squad selection (not greedy)
   - Proper constraints: budget, max 3/team, formation, 15-man squad
+  - Horizon-aware transfer planner with escalating hit thresholds
 
-UI: Streamlit with 5 tabs
+UI: Streamlit with 6 tabs
 """
 
 import streamlit as st
@@ -18,6 +21,9 @@ import requests
 import pandas as pd
 import numpy as np
 import math
+import json
+import re
+import unicodedata
 from pulp import (
     LpProblem, LpMaximize, LpVariable, lpSum, LpStatus, value,
     PULP_CBC_CMD,
@@ -193,6 +199,157 @@ ELO_NAME_MAP = {
     "Sheffield United": "SHU", "Norwich": "NOR",
     "Middlesbrough": "MID", "Luton": "LUT",
 }
+
+
+@st.cache_data(ttl=7200)
+def load_understat_data(season="2025"):
+    """
+    Source 4: Understat — independent xG model with npxG, xA, xGChain, xGBuildup.
+    Scrapes the league page which embeds all player data as JSON in the HTML.
+    Returns: list of dicts with player stats, or (None, error)
+    """
+    try:
+        url = f"https://understat.com/league/EPL/{season}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        resp = requests.get(url, timeout=30, headers=headers)
+        if resp.status_code != 200:
+            return None, f"HTTP {resp.status_code}"
+
+        html = resp.text
+
+        # Understat embeds player data as JSON in a <script> tag:
+        # var playersData = JSON.parse('<escaped json>')
+        match = re.search(r"playersData\s*=\s*JSON\.parse\('(.+?)'\)", html)
+        if not match:
+            return None, "Could not find playersData in page"
+
+        # The JSON is unicode-escaped
+        raw = match.group(1)
+        raw = raw.encode("utf-8").decode("unicode_escape")
+        players = json.loads(raw)
+
+        # Each player has: id, player_name, games, time, goals, xG, assists, xA,
+        # npg, npxG, xGChain, xGBuildup, shots, key_passes, yellow_cards, red_cards,
+        # position, team_title
+        result = []
+        for p in players:
+            mins = int(p.get("time", 0) or 0)
+            games = int(p.get("games", 0) or 0)
+            nineties = mins / 90 if mins > 0 else 0
+
+            result.append({
+                "understat_id": p.get("id"),
+                "player_name": p.get("player_name", ""),
+                "team": p.get("team_title", ""),
+                "position": p.get("position", ""),
+                "games": games,
+                "minutes": mins,
+                "goals": int(p.get("goals", 0) or 0),
+                "xG": float(p.get("xG", 0) or 0),
+                "npxG": float(p.get("npxG", 0) or 0),
+                "assists": int(p.get("assists", 0) or 0),
+                "xA": float(p.get("xA", 0) or 0),
+                "shots": int(p.get("shots", 0) or 0),
+                "key_passes": int(p.get("key_passes", 0) or 0),
+                "xGChain": float(p.get("xGChain", 0) or 0),
+                "xGBuildup": float(p.get("xGBuildup", 0) or 0),
+                # Per-90 stats
+                "xG_per90": round(float(p.get("xG", 0) or 0) / nineties, 3) if nineties >= 3 else 0,
+                "npxG_per90": round(float(p.get("npxG", 0) or 0) / nineties, 3) if nineties >= 3 else 0,
+                "xA_per90": round(float(p.get("xA", 0) or 0) / nineties, 3) if nineties >= 3 else 0,
+                "xGChain_per90": round(float(p.get("xGChain", 0) or 0) / nineties, 3) if nineties >= 3 else 0,
+                "xGBuildup_per90": round(float(p.get("xGBuildup", 0) or 0) / nineties, 3) if nineties >= 3 else 0,
+            })
+
+        return result, None
+    except Exception as e:
+        return None, str(e)
+
+
+def match_understat_to_fpl(understat_players, fpl_df):
+    """
+    Match Understat players to FPL players using name similarity + team.
+    Returns: dict {fpl_id: understat_player_dict}
+
+    Strategy:
+    1. Exact match on full name (first_name + second_name)
+    2. Exact match on web_name
+    3. Fuzzy match: compare lowercase, stripped names
+    """
+    if not understat_players:
+        return {}
+
+    # Understat team name -> FPL short name
+    UNDERSTAT_TEAM_MAP = {
+        "Arsenal": "ARS", "Aston Villa": "AVL", "Bournemouth": "BOU",
+        "Brentford": "BRE", "Brighton": "BHA", "Chelsea": "CHE",
+        "Crystal Palace": "CRY", "Everton": "EVE", "Fulham": "FUL",
+        "Ipswich Town": "IPS", "Leicester": "LEI", "Liverpool": "LIV",
+        "Manchester City": "MCI", "Manchester United": "MUN", "Newcastle United": "NEW",
+        "Nottingham Forest": "NFO", "Southampton": "SOU", "Tottenham": "TOT",
+        "West Ham": "WHU", "Wolverhampton Wanderers": "WOL",
+        "Leeds": "LEE", "Leeds United": "LEE", "Burnley": "BUR",
+        "Sunderland": "SUN", "Sheffield United": "SHU",
+    }
+
+    def normalise(name):
+        """Normalise a name for fuzzy matching."""
+        if not name:
+            return ""
+        # Remove accents/diacritics
+        name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+        return name.lower().strip().replace("-", " ").replace("'", "")
+
+    # Build lookup from Understat: (normalised_name, fpl_team) -> understat data
+    us_lookup = {}
+    for up in understat_players:
+        us_team = UNDERSTAT_TEAM_MAP.get(up["team"], "")
+        norm_name = normalise(up["player_name"])
+        us_lookup[(norm_name, us_team)] = up
+        # Also store by last name only for fallback
+        parts = norm_name.split()
+        if len(parts) > 1:
+            us_lookup[(parts[-1], us_team)] = up
+
+    matched = {}
+    for _, fp in fpl_df.iterrows():
+        fpl_team = fp["team"]
+        fpl_id = fp["id"]
+
+        # Try full name match
+        full_name = normalise(f"{fp['first_name']} {fp['second_name']}")
+        key = (full_name, fpl_team)
+        if key in us_lookup:
+            matched[fpl_id] = us_lookup[key]
+            continue
+
+        # Try web_name match
+        web_name = normalise(fp["name"])
+        key = (web_name, fpl_team)
+        if key in us_lookup:
+            matched[fpl_id] = us_lookup[key]
+            continue
+
+        # Try second_name (surname) only
+        surname = normalise(fp["second_name"])
+        key = (surname, fpl_team)
+        if key in us_lookup:
+            matched[fpl_id] = us_lookup[key]
+            continue
+
+        # Try first_name + first word of second_name (for hyphenated)
+        second_parts = normalise(fp["second_name"]).split()
+        if len(second_parts) > 1:
+            for sp in second_parts:
+                key = (sp, fpl_team)
+                if key in us_lookup:
+                    matched[fpl_id] = us_lookup[key]
+                    break
+
+    return matched
 
 
 @st.cache_data(ttl=3600)
@@ -415,7 +572,8 @@ TEAM_NAME_MAP = {
 
 
 def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
-                     form_xg_data=None, team_fixture_counts=None, elo_ratings=None):
+                     form_xg_data=None, team_fixture_counts=None, elo_ratings=None,
+                     understat_match=None):
     """
     Source 3: Custom expected points model.
 
@@ -544,6 +702,26 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
         else:
             xg_per90 = season_xg
             xa_per90 = season_xa
+
+        # ============================================================
+        # UNDERSTAT BLEND (independent second xG model)
+        # ============================================================
+        # Understat uses a neural-network xG model trained on 100k+ shots,
+        # independent of FPL's Opta-sourced xG. Blending two models reduces
+        # noise and individual model bias.
+        us_data = (understat_match or {}).get(pid)
+        if us_data and us_data.get("minutes", 0) >= 270:
+            us_xg90 = us_data.get("xG_per90", 0)
+            us_xa90 = us_data.get("xA_per90", 0)
+            us_npxg90 = us_data.get("npxG_per90", 0)
+
+            # Blend FPL xG with Understat xG (40% Understat, 60% FPL)
+            # Use npxG from Understat (non-penalty) to avoid double-counting
+            # with our pen taker boost
+            if us_npxg90 > 0:
+                xg_per90 = xg_per90 * 0.6 + us_npxg90 * 0.4
+            if us_xa90 > 0:
+                xa_per90 = xa_per90 * 0.6 + us_xa90 * 0.4
 
         # Also get form-weighted xGC for GKs/DEFs
         form_xgc = None
@@ -1011,11 +1189,18 @@ def enrich_data(bootstrap, fixtures, team_odds):
     # Load Club Elo ratings
     elo_ratings, elo_err = load_club_elo()
 
+    # Load Understat data (independent xG model)
+    understat_players, understat_err = load_understat_data()
+    understat_match = {}
+    if understat_players:
+        understat_match = match_understat_to_fpl(understat_players, df)
+
     # Build xPts model (uses planning_gw_id, so only future fixtures)
     xpts_map = build_xpts_model(df, team_odds, teams, fixtures, gw_id,
                                  form_xg_data=form_xg_data,
                                  team_fixture_counts=team_fixture_counts,
-                                 elo_ratings=elo_ratings)
+                                 elo_ratings=elo_ratings,
+                                 understat_match=understat_match)
 
     # Add xPts columns
     # xpts_next_gw = xPts for the specific next gameweek (planning_gw_id)
@@ -1848,6 +2033,10 @@ def main():
     elo_check, elo_check_err = load_club_elo()
     elo_status = f"✅ {len(elo_check)} teams" if elo_check else f"⚠️ {elo_check_err or 'Unavailable'}"
 
+    # Check Understat status
+    us_check, us_check_err = load_understat_data()
+    us_status = f"✅ {len(us_check)} players" if us_check else f"⚠️ {us_check_err or 'Unavailable'}"
+
     with st.spinner("Building xPts model & enriching data..."):
         df, teams, current_gw, planning_gw_id, upcoming_map, fixtures_list, xpts_map, team_fixture_counts = enrich_data(
             bootstrap, fixtures_raw, team_odds
@@ -1865,7 +2054,7 @@ def main():
             <span class="badge {bc}">{status}</span>
             {f'<span class="badge badge-blue">{planning_str}</span>' if planning_str else ''}
             <span style="color:#5a6580; font-size:0.68rem;">
-                Odds: {odds_status} · Elo: {elo_status} ·
+                Odds: {odds_status} · Elo: {elo_status} · Understat: {us_status} ·
                 {fetch_time.strftime('%d %b %H:%M')} (cached 1hr)
             </span>
         </div>""", unsafe_allow_html=True)
