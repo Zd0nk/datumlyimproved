@@ -1599,7 +1599,7 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
                     break  # negligible gain, not worth the effort
             else:
                 net_gain = transfer["xpts_gain"] - hit_cost
-                if net_gain < 0.25:
+                if net_gain < 0.5:
                     break  # hit not worth it
                 total_hit += hit_cost
 
@@ -1673,7 +1673,7 @@ def main():
     # Header with logo
     st.markdown(
         f'<div style="display:flex; align-items:center; gap:1rem; margin-bottom:0.5rem;">'
-        f'<img src="data:image/png;base64,{DATUMLY_LOGO_B64}" style="height:60px;" />'
+        f'<img src="data:image/png;base64,{DATUMLY_LOGO_B64}" style="height:120px;" />'
         f'</div>',
         unsafe_allow_html=True,
     )
