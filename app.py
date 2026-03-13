@@ -205,7 +205,7 @@ ELO_NAME_MAP = {
 def load_understat_data(season="2025"):
     """
     Source 4: Understat — independent xG model with npxG, xA, xGChain, xGBuildup.
-    Scrapes the league page which embeds all player data as JSON in the HTML.
+    Scrapes the league page which embeds all player data as JSON in script tags.
     Returns: list of dicts with player stats, or (None, error)
     """
     try:
@@ -220,15 +220,63 @@ def load_understat_data(season="2025"):
 
         html = resp.text
 
-        # Understat embeds player data as JSON in a <script> tag:
-        # var playersData = JSON.parse('<escaped json>')
-        match = re.search(r"playersData\s*=\s*JSON\.parse\('(.+?)'\)", html)
-        if not match:
-            return None, "Could not find playersData in page"
+        # Understat embeds player data in a <script> tag as:
+        # var playersData = JSON.parse('\x7B...\x7D')
+        # The data uses \xNN hex escapes, not unicode escapes.
 
-        # The JSON is unicode-escaped
-        raw = match.group(1)
-        raw = raw.encode("utf-8").decode("unicode_escape")
+        # Method 1: look for the hex-escaped pattern
+        pattern = r"playersData\s*=\s*JSON\.parse\('(.+?)'\)"
+        match = re.search(pattern, html)
+
+        if not match:
+            # Method 2: try with double quotes
+            pattern2 = r'playersData\s*=\s*JSON\.parse\("(.+?)"\)'
+            match = re.search(pattern2, html)
+
+        if not match:
+            # Method 3: broader search — find the script containing playersData
+            # and extract between JSON.parse(' and ')
+            idx = html.find("playersData")
+            if idx == -1:
+                return None, "playersData not found in page"
+
+            # Find the JSON.parse(' start
+            parse_start = html.find("JSON.parse('", idx)
+            if parse_start == -1:
+                parse_start = html.find('JSON.parse("', idx)
+                if parse_start == -1:
+                    return None, "JSON.parse not found after playersData"
+                quote_char = '"'
+                parse_start += len('JSON.parse("')
+            else:
+                quote_char = "'"
+                parse_start += len("JSON.parse('")
+
+            # Find the closing quote
+            parse_end = html.find(f"{quote_char})", parse_start)
+            if parse_end == -1:
+                return None, "Could not find end of playersData JSON"
+
+            raw = html[parse_start:parse_end]
+        else:
+            raw = match.group(1)
+
+        # Decode hex escapes (\x22 -> ", \x5B -> [, etc.)
+        # The data is hex-escaped, so we need to decode it
+        try:
+            raw = raw.encode("utf-8").decode("unicode_escape")
+        except Exception:
+            # If unicode_escape fails, try latin-1 decode
+            try:
+                raw = bytes(raw, "utf-8").decode("unicode_escape")
+            except Exception:
+                # Last resort: manual hex replacement
+                raw = re.sub(
+                    r"\\x([0-9a-fA-F]{2})",
+                    lambda m: chr(int(m.group(1), 16)),
+                    raw,
+                )
+
         players = json.loads(raw)
 
         # Each player has: id, player_name, games, time, goals, xG, assists, xA,
