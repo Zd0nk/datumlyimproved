@@ -985,13 +985,22 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
 
 def solve_optimal_squad(players_df, xpts_col="xpts_total", budget=1000):
     """
-    MILP optimisation using PuLP.
-    Selects 15 players maximising total expected points subject to:
-      - Budget: sum(cost) <= budget (in 0.1m units)
-      - Exactly 2 GKP, 5 DEF, 5 MID, 3 FWD
-      - Max 3 players per team
+    XI-aware MILP squad optimisation.
+
+    Instead of treating all 15 players equally, this solver:
+    - Picks 15 players (squad) AND simultaneously picks the best XI from them
+    - XI players are valued at 100% of their xPts
+    - Bench players are valued at ~10% (autosub probability)
+
+    This means the solver will:
+    - Spend money where it matters (starting XI)
+    - Pick cheap bench fodder instead of expensive bench warmers
+    - Free up budget for XI upgrades
+
     Returns: DataFrame of selected 15 players, or None
     """
+    BENCH_WEIGHT = 0.10  # bench players contribute ~10% of their xPts (autosub probability)
+
     eligible = players_df[
         (players_df["minutes"] > 45) &
         (players_df["status"].isin(["a", "d", ""])) &
@@ -1001,7 +1010,6 @@ def solve_optimal_squad(players_df, xpts_col="xpts_total", budget=1000):
     if len(eligible) < 15:
         return None, "Not enough eligible players"
 
-    # Ensure no NaN values in key columns (NaN crashes PuLP)
     eligible[xpts_col] = eligible[xpts_col].fillna(0).astype(float)
     eligible["now_cost"] = eligible["now_cost"].fillna(0).astype(int)
     eligible = eligible[eligible[xpts_col].notna() & eligible["now_cost"].notna()]
@@ -1009,38 +1017,68 @@ def solve_optimal_squad(players_df, xpts_col="xpts_total", budget=1000):
     if len(eligible) < 15:
         return None, "Not enough eligible players after NaN removal"
 
-    prob = LpProblem("FPL_Squad", LpMaximize)
+    prob = LpProblem("FPL_Squad_XI_Aware", LpMaximize)
 
-    # Build lookup dicts for fast, safe access
     eligible = eligible.reset_index(drop=True)
     pid_to_idx = {row["id"]: i for i, row in eligible.iterrows()}
     xpts_vals = eligible[xpts_col].tolist()
     cost_vals = eligible["now_cost"].tolist()
     pos_vals = eligible["pos_id"].tolist()
     team_vals = eligible["team_id"].tolist()
-
-    # Decision variables: x_i = 1 if player i is selected
     player_ids = eligible["id"].tolist()
-    x = {pid: LpVariable(f"x_{pid}", cat="Binary") for pid in player_ids}
 
-    # Objective: maximise total xPts
-    prob += lpSum(x[pid] * xpts_vals[pid_to_idx[pid]] for pid in player_ids)
+    # Two sets of decision variables:
+    # s[pid] = 1 if player is in the 15-man squad
+    # xi[pid] = 1 if player is in the starting XI (subset of squad)
+    s = {pid: LpVariable(f"s_{pid}", cat="Binary") for pid in player_ids}
+    xi = {pid: LpVariable(f"xi_{pid}", cat="Binary") for pid in player_ids}
 
-    # Budget constraint
-    prob += lpSum(x[pid] * cost_vals[pid_to_idx[pid]] for pid in player_ids) <= budget
+    # Objective: maximise XI xPts (full value) + bench xPts (discounted)
+    # bench_xpts = squad_xpts - xi_xpts, so:
+    # total = xi * xpts * 1.0 + (s - xi) * xpts * BENCH_WEIGHT
+    #       = xi * xpts * (1.0 - BENCH_WEIGHT) + s * xpts * BENCH_WEIGHT
+    prob += lpSum(
+        xi[pid] * xpts_vals[pid_to_idx[pid]] * (1.0 - BENCH_WEIGHT)
+        + s[pid] * xpts_vals[pid_to_idx[pid]] * BENCH_WEIGHT
+        for pid in player_ids
+    )
 
-    # Squad size = 15
-    prob += lpSum(x[pid] for pid in player_ids) == 15
+    # --- SQUAD constraints (15 players) ---
+    prob += lpSum(s[pid] for pid in player_ids) == 15
 
-    # Position constraints: 2 GK, 5 DEF, 5 MID, 3 FWD
+    # Budget
+    prob += lpSum(s[pid] * cost_vals[pid_to_idx[pid]] for pid in player_ids) <= budget
+
+    # Position constraints for squad: 2 GK, 5 DEF, 5 MID, 3 FWD
     for pos_id, count in [(1, 2), (2, 5), (3, 5), (4, 3)]:
         pos_pids = [pid for pid in player_ids if pos_vals[pid_to_idx[pid]] == pos_id]
-        prob += lpSum(x[pid] for pid in pos_pids) == count
+        prob += lpSum(s[pid] for pid in pos_pids) == count
 
     # Max 3 per team
     for team_id in set(team_vals):
         team_pids = [pid for pid in player_ids if team_vals[pid_to_idx[pid]] == team_id]
-        prob += lpSum(x[pid] for pid in team_pids) <= 3
+        prob += lpSum(s[pid] for pid in team_pids) <= 3
+
+    # --- XI constraints (11 from the 15) ---
+    prob += lpSum(xi[pid] for pid in player_ids) == 11
+
+    # XI must be subset of squad: xi[pid] <= s[pid]
+    for pid in player_ids:
+        prob += xi[pid] <= s[pid]
+
+    # XI formation: exactly 1 GK, 3-5 DEF, 2-5 MID, 1-3 FWD
+    gk_pids = [pid for pid in player_ids if pos_vals[pid_to_idx[pid]] == 1]
+    def_pids = [pid for pid in player_ids if pos_vals[pid_to_idx[pid]] == 2]
+    mid_pids = [pid for pid in player_ids if pos_vals[pid_to_idx[pid]] == 3]
+    fwd_pids = [pid for pid in player_ids if pos_vals[pid_to_idx[pid]] == 4]
+
+    prob += lpSum(xi[pid] for pid in gk_pids) == 1
+    prob += lpSum(xi[pid] for pid in def_pids) >= 3
+    prob += lpSum(xi[pid] for pid in def_pids) <= 5
+    prob += lpSum(xi[pid] for pid in mid_pids) >= 2
+    prob += lpSum(xi[pid] for pid in mid_pids) <= 5
+    prob += lpSum(xi[pid] for pid in fwd_pids) >= 1
+    prob += lpSum(xi[pid] for pid in fwd_pids) <= 3
 
     # Solve
     try:
@@ -1052,9 +1090,11 @@ def solve_optimal_squad(players_df, xpts_col="xpts_total", budget=1000):
     if LpStatus[prob.status] != "Optimal":
         return None, f"Solver status: {LpStatus[prob.status]}"
 
-    # Extract selected players
-    selected_ids = [pid for pid in player_ids if value(x[pid]) is not None and value(x[pid]) > 0.5]
+    # Extract selected players, mark who is XI vs bench
+    selected_ids = [pid for pid in player_ids if value(s[pid]) is not None and value(s[pid]) > 0.5]
+    xi_ids = [pid for pid in player_ids if value(xi[pid]) is not None and value(xi[pid]) > 0.5]
     squad = eligible[eligible["id"].isin(selected_ids)].copy()
+    squad["is_xi"] = squad["id"].isin(xi_ids)
 
     return squad, None
 
@@ -1789,8 +1829,16 @@ def solve_wildcard_squad(all_players_df, xpts_map, planning_gw, n_future, budget
     prob = LpProblem("Wildcard", LpMaximize)
     x = {pid: LpVariable(f"wc_{pid}", cat="Binary") for pid in pids}
 
-    # Objective: maximise total xPts
-    prob += lpSum(x[pid] * xv[pid_map[pid]] for pid in pids)
+    # XI-aware: pick best XI within the squad, bench valued at 10%
+    BENCH_WEIGHT = 0.10
+    xi = {pid: LpVariable(f"wcxi_{pid}", cat="Binary") for pid in pids}
+
+    # Objective: XI at full value + bench at discount
+    prob += lpSum(
+        xi[pid] * xv[pid_map[pid]] * (1.0 - BENCH_WEIGHT)
+        + x[pid] * xv[pid_map[pid]] * BENCH_WEIGHT
+        for pid in pids
+    )
 
     # Budget
     prob += lpSum(x[pid] * cv[pid_map[pid]] for pid in pids) <= budget
@@ -1798,9 +1846,27 @@ def solve_wildcard_squad(all_players_df, xpts_map, planning_gw, n_future, budget
     # Squad = 15
     prob += lpSum(x[pid] for pid in pids) == 15
 
-    # Position constraints
+    # XI = 11, subset of squad
+    prob += lpSum(xi[pid] for pid in pids) == 11
+    for pid in pids:
+        prob += xi[pid] <= x[pid]
+
+    # Position constraints for squad
     for pos_id, cnt in [(1, 2), (2, 5), (3, 5), (4, 3)]:
         prob += lpSum(x[pid] for pid in pids if pv[pid_map[pid]] == pos_id) == cnt
+
+    # XI formation constraints
+    gk_p = [pid for pid in pids if pv[pid_map[pid]] == 1]
+    def_p = [pid for pid in pids if pv[pid_map[pid]] == 2]
+    mid_p = [pid for pid in pids if pv[pid_map[pid]] == 3]
+    fwd_p = [pid for pid in pids if pv[pid_map[pid]] == 4]
+    prob += lpSum(xi[pid] for pid in gk_p) == 1
+    prob += lpSum(xi[pid] for pid in def_p) >= 3
+    prob += lpSum(xi[pid] for pid in def_p) <= 5
+    prob += lpSum(xi[pid] for pid in mid_p) >= 2
+    prob += lpSum(xi[pid] for pid in mid_p) <= 5
+    prob += lpSum(xi[pid] for pid in fwd_p) >= 1
+    prob += lpSum(xi[pid] for pid in fwd_p) <= 3
 
     # Max 3 per team
     for tid in set(tv):
@@ -1822,11 +1888,23 @@ def solve_wildcard_squad(all_players_df, xpts_map, planning_gw, n_future, budget
         # If infeasible with 11-player constraint (e.g. massive blank), try 8
         prob2 = LpProblem("Wildcard_relaxed", LpMaximize)
         x2 = {pid: LpVariable(f"wc2_{pid}", cat="Binary") for pid in pids}
-        prob2 += lpSum(x2[pid] * xv[pid_map[pid]] for pid in pids)
+        xi2 = {pid: LpVariable(f"wc2xi_{pid}", cat="Binary") for pid in pids}
+        prob2 += lpSum(
+            xi2[pid] * xv[pid_map[pid]] * (1.0 - BENCH_WEIGHT)
+            + x2[pid] * xv[pid_map[pid]] * BENCH_WEIGHT
+            for pid in pids
+        )
         prob2 += lpSum(x2[pid] * cv[pid_map[pid]] for pid in pids) <= budget
         prob2 += lpSum(x2[pid] for pid in pids) == 15
+        prob2 += lpSum(xi2[pid] for pid in pids) == 11
+        for pid in pids:
+            prob2 += xi2[pid] <= x2[pid]
         for pos_id, cnt in [(1, 2), (2, 5), (3, 5), (4, 3)]:
             prob2 += lpSum(x2[pid] for pid in pids if pv[pid_map[pid]] == pos_id) == cnt
+        prob2 += lpSum(xi2[pid] for pid in gk_p) == 1
+        prob2 += lpSum(xi2[pid] for pid in def_p) >= 3
+        prob2 += lpSum(xi2[pid] for pid in mid_p) >= 2
+        prob2 += lpSum(xi2[pid] for pid in fwd_p) >= 1
         for tid in set(tv):
             prob2 += lpSum(x2[pid] for pid in pids if tv[pid_map[pid]] == tid) <= 3
         for gw in gw_range:
@@ -2639,8 +2717,9 @@ def main():
             '<span class="source-tag src-model">PuLP Solver</span></div>',
             unsafe_allow_html=True,
         )
-        st.caption("Mathematically optimal 15-man squad maximising total xPts over 6 gameweeks. "
-                    "Constraints: £100m budget, 2 GK / 5 DEF / 5 MID / 3 FWD, max 3 per team.")
+        st.caption("XI-aware optimal squad: maximises starting XI xPts with bench valued at 10% "
+                    "(autosub probability). Budget saved on bench is redirected to XI upgrades. "
+                    "Constraints: £100m, 2 GK / 5 DEF / 5 MID / 3 FWD, max 3 per team.")
 
         if len(qualified) > 0:
             with st.spinner("Running MILP solver..."):
