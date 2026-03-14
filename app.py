@@ -999,7 +999,7 @@ def solve_optimal_squad(players_df, xpts_col="xpts_total", budget=1000):
 
     Returns: DataFrame of selected 15 players, or None
     """
-    BENCH_WEIGHT = 0.10  # bench players contribute ~10% of their xPts (autosub probability)
+    BENCH_WEIGHT = 0.05  # bench players contribute ~5% of their xPts (rare autosub)
 
     eligible = players_df[
         (players_df["minutes"] > 45) &
@@ -1829,8 +1829,8 @@ def solve_wildcard_squad(all_players_df, xpts_map, planning_gw, n_future, budget
     prob = LpProblem("Wildcard", LpMaximize)
     x = {pid: LpVariable(f"wc_{pid}", cat="Binary") for pid in pids}
 
-    # XI-aware: pick best XI within the squad, bench valued at 10%
-    BENCH_WEIGHT = 0.10
+    # XI-aware: pick best XI within the squad, bench valued at 5%
+    BENCH_WEIGHT = 0.05
     xi = {pid: LpVariable(f"wcxi_{pid}", cat="Binary") for pid in pids}
 
     # Objective: XI at full value + bench at discount
@@ -2732,13 +2732,16 @@ def main():
                 total_cost = squad["now_cost"].sum() / 10
                 total_xpts = squad["xpts_total"].sum()
                 xi_xpts = xi["xpts_next_gw"].sum() if xi is not None else 0
+                xi_cost = xi["now_cost"].sum() / 10 if xi is not None else 0
+                bench_cost = bench["now_cost"].sum() / 10 if bench is not None else 0
                 formation = get_formation_str(xi)
 
-                c1, c2, c3, c4 = st.columns(4)
+                c1, c2, c3, c4, c5 = st.columns(5)
                 c1.metric("Total Cost", f"£{total_cost:.1f}m")
-                c2.metric("Squad xPts (6GW)", f"{total_xpts:.1f}")
-                c3.metric("XI xPts (Next GW)", f"{xi_xpts:.1f}")
-                c4.metric("Formation", formation)
+                c2.metric("XI Cost", f"£{xi_cost:.1f}m")
+                c3.metric("Bench Cost", f"£{bench_cost:.1f}m")
+                c4.metric("XI xPts (Next GW)", f"{xi_xpts:.1f}")
+                c5.metric("Formation", formation)
 
                 st.markdown("")
 
