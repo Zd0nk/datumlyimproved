@@ -999,7 +999,7 @@ def solve_optimal_squad(players_df, xpts_col="xpts_total", budget=1000):
 
     Returns: DataFrame of selected 15 players, or None
     """
-    BENCH_COST_PENALTY = 0.15  # penalty per £0.1m of bench cost
+    BENCH_COST_PENALTY = 0.10  # penalty per £0.1m of bench cost
 
     eligible = players_df[
         (players_df["minutes"] > 45) &
