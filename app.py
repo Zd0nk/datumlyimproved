@@ -1760,14 +1760,19 @@ def find_best_captain(squad_df, xpts_map, gw_id):
 def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
                        purchase_prices, selling_prices_api, xpts_map,
                        planning_gw_id, n_gws=6, chip_schedule=None,
-                       team_fixture_counts=None):
+                       team_fixture_counts=None, locked_ids=None, banned_ids=None):
     """
     Chip-aware rolling planner.
     chip_schedule: {gw_id: chip_name} e.g. {31: "wildcard", 33: "bench_boost"}
-    Chips: "wildcard", "free_hit", "triple_captain", "bench_boost"
+    locked_ids: players that must NOT be sold (transfers won't suggest selling them)
+    banned_ids: players that must NOT be bought (excluded from transfer candidates)
     """
     if chip_schedule is None:
         chip_schedule = {}
+    if locked_ids is None:
+        locked_ids = set()
+    if banned_ids is None:
+        banned_ids = set()
 
     plan = []
     current_squad = my_squad_df.copy()
@@ -1795,7 +1800,8 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
         if chip == "free_hit":
             pre_fh_squad = current_squad.copy()
             total_val = int(current_bank + current_squad["now_cost"].sum())
-            fh_squad = solve_free_hit_squad(all_players_df, xpts_map, gw, total_val)
+            fh_pool = all_players_df[~all_players_df["id"].isin(banned_ids)] if banned_ids else all_players_df
+            fh_squad = solve_free_hit_squad(fh_pool, xpts_map, gw, total_val)
             if fh_squad is not None:
                 gw_entry["squad"] = fh_squad
                 xi, bench = solve_best_xi_for_gw(fh_squad, xpts_map, gw)
@@ -1816,7 +1822,8 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
         # === WILDCARD ===
         if chip == "wildcard":
             total_val = int(current_bank + current_squad["now_cost"].sum())
-            wc_squad = solve_wildcard_squad(all_players_df, xpts_map, gw, n_gws - i, total_val,
+            wc_pool = all_players_df[~all_players_df["id"].isin(banned_ids)] if banned_ids else all_players_df
+            wc_squad = solve_wildcard_squad(wc_pool, xpts_map, gw, n_gws - i, total_val,
                                                team_fixture_counts=team_fixture_counts)
             if wc_squad is not None:
                 current_squad = wc_squad
@@ -1843,14 +1850,20 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
         # GW30 transfer considers GW30-35, GW31 considers GW31-35, etc.
         horizon_end = planning_gw_id + n_gws
 
+        # Filter out banned players from the candidate pool
+        transfer_pool = all_players_df[~all_players_df["id"].isin(banned_ids)] if banned_ids else all_players_df
+
+        # Locked players can't be sold — add them to exclude set
+        transfer_exclude = set(locked_ids)
+
         # Keep finding improving transfers until no more gains
         # Cap at FTs + 2 hits max (so worst case is -8, never -12 or more)
         max_transfers = min(current_ft + 2, 7)
         for t_num in range(max_transfers):
             transfer = find_best_single_transfer_for_gw(
-                current_squad, all_players_df, current_bank,
+                current_squad, transfer_pool, current_bank,
                 current_purchase, current_selling, xpts_map, gw,
-                exclude_ids=recently_sold,
+                exclude_ids=recently_sold | transfer_exclude,
                 horizon_end=horizon_end,
             )
 
@@ -2185,8 +2198,44 @@ def main():
 
                     st.markdown("")
 
-                    # Step 2: Generate plan
-                    st.markdown("**Step 2: Generate your optimal plan**")
+                    # Step 2: Lock & Ban players
+                    st.markdown("**Step 2: Lock & ban players**")
+                    # Build player options from the full player pool
+                    all_opts = df[df["minutes"] > 0].sort_values("xpts_total", ascending=False)
+                    planner_labels = {
+                        row["id"]: f"{row['name']} ({row['team']}, {row['pos']}, £{row['price']:.1f}m)"
+                        for _, row in all_opts.iterrows()
+                    }
+                    # Separate current squad players for the lock dropdown
+                    squad_ids = set(my_squad["id"].tolist())
+                    squad_labels = {pid: planner_labels[pid] for pid in squad_ids if pid in planner_labels}
+                    non_squad_labels = {pid: planner_labels[pid] for pid in planner_labels if pid not in squad_ids}
+
+                    lock_col, ban_col = st.columns(2)
+                    with lock_col:
+                        planner_locked = st.multiselect(
+                            "🔒 Lock (don't sell these)",
+                            options=list(squad_labels.keys()),
+                            format_func=lambda pid: squad_labels.get(pid, str(pid)),
+                            placeholder="Players to keep...",
+                            key="planner_lock",
+                        )
+                    with ban_col:
+                        planner_banned = st.multiselect(
+                            "🚫 Ban (don't buy these)",
+                            options=list(non_squad_labels.keys()),
+                            format_func=lambda pid: non_squad_labels.get(pid, str(pid)),
+                            placeholder="Players to avoid...",
+                            key="planner_ban",
+                        )
+
+                    planner_locked_ids = set(planner_locked)
+                    planner_banned_ids = set(planner_banned)
+
+                    st.markdown("")
+
+                    # Step 3: Generate plan
+                    st.markdown("**Step 3: Generate your optimal plan**")
                     generate = st.button("🚀 Generate 6-Gameweek Plan", use_container_width=True, type="primary")
 
                     if generate or st.session_state.get("plan_generated"):
@@ -2204,6 +2253,8 @@ def main():
                                 n_gws=6,
                                 chip_schedule=chip_schedule,
                                 team_fixture_counts=team_fixture_counts,
+                                locked_ids=planner_locked_ids,
+                                banned_ids=planner_banned_ids,
                             )
 
                         st.markdown("")
