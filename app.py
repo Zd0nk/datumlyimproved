@@ -751,15 +751,28 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
             # Caicedo, Rice) valuable across ALL fixture difficulties.
             defcon_per90 = float(p.get("defcon_per90", 0) or 0)
             if defcon_per90 > 0 and pos in [2, 3, 4] and nineties >= 3:
-                # defcon_per90 from FPL API = DC points earned per 90 (0 or 2 scale)
-                # So defcon_per90 of 1.6 means they earn 2pts in ~80% of full games
-                # Normalise to a probability of hitting the threshold
-                defcon_prob = min(defcon_per90 / 2.0, 1.0)
+                # defcon_per90 from FPL API = DC points earned per 90 (0-2 scale)
+                # A player with defcon_per90 of 2.0 earns DC in every full game
+                # A player with defcon_per90 of 1.0 earns DC in ~50% of games
+                #
+                # Real-world rates (from 2025/26 data):
+                #   Elite DC earners (Tarkowski, Senesi): ~60-70% of games
+                #   Good DC earners (most CBs): ~30-50%
+                #   Occasional (attacking DEFs): ~10-20%
+                #   CDMs (Caicedo, Rice): ~20-35%
+                #   Other MIDs/FWDs: ~5-15%
+                #
+                # Apply a conservative conversion with diminishing returns
+                # to avoid over-projecting
+                raw_prob = defcon_per90 / 2.0  # 0-1 scale
+                # Apply square root dampening — reduces high values more gently
+                # 1.0 -> 1.0, 0.8 -> 0.89, 0.5 -> 0.71, 0.3 -> 0.55
+                # Then scale down by 0.6 to be conservative
+                defcon_prob = min((raw_prob ** 0.5) * 0.6, 0.75)  # hard cap at 75%
 
-                # Adjust for opponent attack strength:
-                # Stronger opponent = more pressure = more CBIT/CBIRT opportunities
-                # This is what makes Senesi great vs big teams
-                defcon_prob = min(defcon_prob * (0.8 + 0.2 * opp_atk_str), 1.0)
+                # Mild fixture adjustment (±10% based on opponent attack)
+                defcon_prob *= (0.9 + 0.1 * opp_atk_str)
+                defcon_prob = min(defcon_prob, 0.75)
 
                 defcon_xpts = 2.0 * defcon_prob * full_game_prob
                 xpts += defcon_xpts
