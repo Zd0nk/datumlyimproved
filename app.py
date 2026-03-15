@@ -811,29 +811,37 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
 # MILP SOLVER
 # ============================================================
 
-def solve_optimal_squad(players_df, xpts_col="xpts_total", budget=1000):
+def solve_optimal_squad(players_df, xpts_col="xpts_total", budget=1000,
+                        locked_ids=None, banned_ids=None):
     """
     XI-focused MILP squad optimisation with bench cost penalty.
 
-    The solver maximises XI xPts while PENALISING expensive bench players.
-    This forces the solver to pick cheap bench fodder and spend on the XI.
-
-    Objective = XI_xPts - (bench_cost × penalty_per_0.1m)
-
-    A bench player costing £7m gets penalised: 70 × 0.15 = 10.5 pts deducted
-    A bench player costing £4.5m gets penalised: 45 × 0.15 = 6.75 pts deducted
-    So the solver saves £2.5m (25 units) for a 3.75 pt gain in the objective,
-    which it can reinvest into a better XI player.
+    locked_ids: set of player IDs that MUST be in the squad
+    banned_ids: set of player IDs that MUST NOT be in the squad
 
     Returns: DataFrame of selected 15 players, or None
     """
-    BENCH_COST_PENALTY = 0.10  # penalty per £0.1m of bench cost
+    BENCH_COST_PENALTY = 0.10
+
+    if locked_ids is None:
+        locked_ids = set()
+    if banned_ids is None:
+        banned_ids = set()
 
     eligible = players_df[
         (players_df["minutes"] > 45) &
         (players_df["status"].isin(["a", "d", ""])) &
         (players_df[xpts_col] > 0)
     ].copy()
+
+    # Also include locked players even if they fail the minutes/status filter
+    if locked_ids:
+        locked_players = players_df[players_df["id"].isin(locked_ids)]
+        eligible = pd.concat([eligible, locked_players]).drop_duplicates(subset="id")
+
+    # Remove banned players
+    if banned_ids:
+        eligible = eligible[~eligible["id"].isin(banned_ids)]
 
     if len(eligible) < 15:
         return None, "Not enough eligible players"
@@ -884,6 +892,11 @@ def solve_optimal_squad(players_df, xpts_col="xpts_total", budget=1000):
     for team_id in set(team_vals):
         team_pids = [pid for pid in player_ids if team_vals[pid_to_idx[pid]] == team_id]
         prob += lpSum(s[pid] for pid in team_pids) <= 3
+
+    # --- LOCKED players: must be in squad ---
+    for pid in player_ids:
+        if pid in locked_ids:
+            prob += s[pid] == 1
 
     # --- XI constraints (11 from the 15) ---
     prob += lpSum(xi[pid] for pid in player_ids) == 11
@@ -2670,13 +2683,47 @@ def main():
             '<span class="source-tag src-model">PuLP Solver</span></div>',
             unsafe_allow_html=True,
         )
-        st.caption("XI-aware optimal squad: maximises starting XI xPts with bench valued at 10% "
-                    "(autosub probability). Budget saved on bench is redirected to XI upgrades. "
+        st.caption("XI-aware optimal squad: maximises starting XI xPts with bench cost penalty. "
+                    "Budget saved on bench is redirected to XI upgrades. "
                     "Constraints: £100m, 2 GK / 5 DEF / 5 MID / 3 FWD, max 3 per team.")
 
         if len(qualified) > 0:
+            # Player lock/ban controls
+            all_player_options = qualified.sort_values("xpts_total", ascending=False)
+            player_labels = {
+                row["id"]: f"{row['name']} ({row['team']}, {row['pos']}, £{row['price']:.1f}m)"
+                for _, row in all_player_options.iterrows()
+            }
+
+            col_lock, col_ban = st.columns(2)
+            with col_lock:
+                locked_selections = st.multiselect(
+                    "🔒 Lock players (must include)",
+                    options=list(player_labels.keys()),
+                    format_func=lambda pid: player_labels.get(pid, str(pid)),
+                    placeholder="e.g. Salah, Haaland...",
+                )
+            with col_ban:
+                banned_selections = st.multiselect(
+                    "🚫 Ban players (exclude)",
+                    options=list(player_labels.keys()),
+                    format_func=lambda pid: player_labels.get(pid, str(pid)),
+                    placeholder="e.g. injured players, avoid...",
+                )
+
+            locked_ids = set(locked_selections)
+            banned_ids = set(banned_selections)
+
+            # Warn if too many locked
+            if len(locked_ids) > 15:
+                st.warning("You can't lock more than 15 players.")
+                locked_ids = set()
+
             with st.spinner("Running MILP solver..."):
-                squad, solve_err = solve_optimal_squad(qualified, "xpts_total", 1000)
+                squad, solve_err = solve_optimal_squad(
+                    qualified, "xpts_total", 1000,
+                    locked_ids=locked_ids, banned_ids=banned_ids,
+                )
 
             if squad is not None and len(squad) == 15:
                 # Solve best XI
