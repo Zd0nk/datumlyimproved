@@ -2592,6 +2592,152 @@ def main():
                         else:
                             st.info("Could not build a rolling plan — not enough fixture data.")
 
+                        # === EXPORT PLAN TO EXCEL ===
+                        if plan and len(plan) > 0:
+                            st.markdown("")
+                            if st.button("📥 Export Plan to Excel", use_container_width=True):
+                                import io
+                                from openpyxl import Workbook
+                                from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+
+                                wb = Workbook()
+
+                                # --- Sheet 1: Plan Summary ---
+                                ws_summary = wb.active
+                                ws_summary.title = "Plan Summary"
+
+                                header_font = Font(bold=True, color="FFFFFF", size=11, name="Arial")
+                                header_fill = PatternFill("solid", fgColor="2D2D3D")
+                                pink_fill = PatternFill("solid", fgColor="F02D6E")
+                                green_font = Font(color="34D399", bold=True, name="Arial")
+                                red_font = Font(color="F87171", bold=True, name="Arial")
+                                default_font = Font(name="Arial", size=10)
+                                thin_border = Border(
+                                    bottom=Side(style="thin", color="3A3A4A")
+                                )
+
+                                # Headers
+                                summary_headers = ["GW", "Chip", "Transfers", "Hits (pts)", "FTs Used",
+                                                   "Formation", "XI xPts", "Captain", "Cap xPts", "Bench xPts"]
+                                for col, h in enumerate(summary_headers, 1):
+                                    cell = ws_summary.cell(row=1, column=col, value=h)
+                                    cell.font = header_font
+                                    cell.fill = header_fill
+                                    cell.alignment = Alignment(horizontal="center")
+
+                                for row_idx, gw_e in enumerate(plan, 2):
+                                    gw = gw_e["gw"]
+                                    chip = gw_e.get("chip", "—") or "—"
+                                    transfers_list = gw_e.get("transfers", [])
+                                    hit = gw_e.get("hit", 0)
+                                    ft_used = gw_e.get("ft_used", 0)
+                                    xi_data = gw_e.get("xi")
+                                    bench_data = gw_e.get("bench")
+                                    captain = gw_e.get("captain")
+                                    cap_mult = gw_e.get("captain_multiplier", 2)
+
+                                    formation = get_formation_str(xi_data) if xi_data is not None else "?"
+                                    xi_xpts = xi_data["xpts_gw"].sum() if xi_data is not None and "xpts_gw" in xi_data.columns else 0
+                                    bench_xpts = bench_data["xpts_gw"].sum() if bench_data is not None and "xpts_gw" in bench_data.columns else 0
+                                    cap_name = captain.get("name", "?") if captain else "?"
+                                    cap_xpts = xpts_map.get(captain.get("id", 0), {}).get(gw, 0) * cap_mult if captain else 0
+
+                                    ws_summary.cell(row=row_idx, column=1, value=f"GW{gw}").font = default_font
+                                    ws_summary.cell(row=row_idx, column=2, value=chip).font = default_font
+                                    ws_summary.cell(row=row_idx, column=3, value=len(transfers_list)).font = default_font
+                                    c_hit = ws_summary.cell(row=row_idx, column=4, value=f"-{hit}" if hit > 0 else "0")
+                                    c_hit.font = red_font if hit > 0 else default_font
+                                    ws_summary.cell(row=row_idx, column=5, value=ft_used).font = default_font
+                                    ws_summary.cell(row=row_idx, column=6, value=formation).font = default_font
+                                    ws_summary.cell(row=row_idx, column=7, value=round(xi_xpts, 1)).font = green_font
+                                    ws_summary.cell(row=row_idx, column=8, value=cap_name).font = default_font
+                                    ws_summary.cell(row=row_idx, column=9, value=round(cap_xpts, 1)).font = default_font
+                                    ws_summary.cell(row=row_idx, column=10, value=round(bench_xpts, 1)).font = default_font
+
+                                for col in range(1, 11):
+                                    ws_summary.column_dimensions[chr(64 + col)].width = 14
+
+                                # --- Sheet 2: Transfers ---
+                                ws_transfers = wb.create_sheet("Transfers")
+                                t_headers = ["GW", "Out", "Out Team", "Out Pos", "Out Price",
+                                            "In", "In Team", "In Pos", "In Price",
+                                            "Horizon Gain", "GW Gain", "Type", "Bank After"]
+                                for col, h in enumerate(t_headers, 1):
+                                    cell = ws_transfers.cell(row=1, column=col, value=h)
+                                    cell.font = header_font
+                                    cell.fill = header_fill
+                                    cell.alignment = Alignment(horizontal="center")
+
+                                t_row = 2
+                                for gw_e in plan:
+                                    gw = gw_e["gw"]
+                                    ft_used = gw_e.get("ft_used", 0)
+                                    for t_idx, t in enumerate(gw_e.get("transfers", [])):
+                                        o = t["out"]
+                                        i_p = t["in"]
+                                        is_free = t_idx < ft_used
+                                        ws_transfers.cell(row=t_row, column=1, value=f"GW{gw}").font = default_font
+                                        ws_transfers.cell(row=t_row, column=2, value=o.get("name", "?")).font = red_font
+                                        ws_transfers.cell(row=t_row, column=3, value=o.get("team", "?")).font = default_font
+                                        ws_transfers.cell(row=t_row, column=4, value=o.get("pos", "?")).font = default_font
+                                        ws_transfers.cell(row=t_row, column=5, value=round(o.get("now_cost", 0) / 10, 1)).font = default_font
+                                        ws_transfers.cell(row=t_row, column=6, value=i_p.get("name", "?")).font = green_font
+                                        ws_transfers.cell(row=t_row, column=7, value=i_p.get("team", "?")).font = default_font
+                                        ws_transfers.cell(row=t_row, column=8, value=i_p.get("pos", "?")).font = default_font
+                                        ws_transfers.cell(row=t_row, column=9, value=round(i_p.get("now_cost", 0) / 10, 1)).font = default_font
+                                        ws_transfers.cell(row=t_row, column=10, value=t.get("xpts_gain", 0)).font = default_font
+                                        ws_transfers.cell(row=t_row, column=11, value=t.get("xpts_gw_gain", 0)).font = default_font
+                                        ws_transfers.cell(row=t_row, column=12, value="Free" if is_free else "-4pt Hit").font = default_font
+                                        ws_transfers.cell(row=t_row, column=13, value=round(t.get("new_bank", 0) / 10, 1)).font = default_font
+                                        t_row += 1
+
+                                for col in range(1, 14):
+                                    ws_transfers.column_dimensions[chr(64 + col) if col <= 26 else "A" + chr(64 + col - 26)].width = 14
+
+                                # --- Sheet 3: Starting XIs per GW ---
+                                ws_xi = wb.create_sheet("Starting XIs")
+                                xi_headers = ["GW", "Player", "Team", "Pos", "Price", "xPts", "Captain"]
+                                for col, h in enumerate(xi_headers, 1):
+                                    cell = ws_xi.cell(row=1, column=col, value=h)
+                                    cell.font = header_font
+                                    cell.fill = header_fill
+                                    cell.alignment = Alignment(horizontal="center")
+
+                                xi_row = 2
+                                for gw_e in plan:
+                                    gw = gw_e["gw"]
+                                    xi_data = gw_e.get("xi")
+                                    captain = gw_e.get("captain")
+                                    cap_id = captain.get("id") if captain else None
+
+                                    if xi_data is not None:
+                                        for _, p in xi_data.sort_values("pos_id").iterrows():
+                                            is_cap = p["id"] == cap_id
+                                            ws_xi.cell(row=xi_row, column=1, value=f"GW{gw}").font = default_font
+                                            ws_xi.cell(row=xi_row, column=2, value=p["name"]).font = default_font
+                                            ws_xi.cell(row=xi_row, column=3, value=p.get("team", "?")).font = default_font
+                                            ws_xi.cell(row=xi_row, column=4, value=p.get("pos", "?")).font = default_font
+                                            ws_xi.cell(row=xi_row, column=5, value=round(p.get("price", 0), 1)).font = default_font
+                                            ws_xi.cell(row=xi_row, column=6, value=round(p.get("xpts_gw", 0), 1)).font = green_font
+                                            ws_xi.cell(row=xi_row, column=7, value="(C)" if is_cap else "").font = Font(name="Arial", color="FFD700", bold=True) if is_cap else default_font
+                                            xi_row += 1
+
+                                for col in range(1, 8):
+                                    ws_xi.column_dimensions[chr(64 + col)].width = 14
+
+                                # Save to buffer
+                                buf = io.BytesIO()
+                                wb.save(buf)
+                                buf.seek(0)
+
+                                st.download_button(
+                                    label="⬇️ Download Plan (.xlsx)",
+                                    data=buf,
+                                    file_name=f"datumly_plan_GW{planning_gw_id}-{planning_gw_id + 5}.xlsx",
+                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                    use_container_width=True,
+                                )
+
                     # Full squad table
                     st.markdown("")
                     st.subheader("Full Squad Breakdown")
