@@ -1571,15 +1571,24 @@ def find_best_single_transfer_for_gw(squad_df, all_players_df, bank,
     return best
 
 
-def solve_free_hit_squad(all_players_df, xpts_map, gw_id, budget=1000):
+def solve_free_hit_squad(all_players_df, xpts_map, gw_id, budget=1000, locked_ids=None):
     """Free Hit: pick best possible 15-man squad for a single GW."""
+    if locked_ids is None:
+        locked_ids = set()
     eligible = all_players_df[
         (all_players_df["minutes"] > 45) &
         (all_players_df["status"].isin(["a", "d", ""]))
     ].copy()
+    # Include locked players even if they fail filters
+    if locked_ids:
+        locked_players = all_players_df[all_players_df["id"].isin(locked_ids)]
+        eligible = pd.concat([eligible, locked_players]).drop_duplicates(subset="id")
     eligible["xpts_gw"] = eligible["id"].map(lambda pid: xpts_map.get(pid, {}).get(gw_id, 0))
     # For Free Hit, only pick players who actually have a fixture this GW
-    eligible = eligible[eligible["xpts_gw"] > 0].copy()
+    # But keep locked players even if they blank
+    has_fixture = eligible["xpts_gw"] > 0
+    is_locked = eligible["id"].isin(locked_ids)
+    eligible = eligible[has_fixture | is_locked].copy()
     eligible["xpts_gw"] = eligible["xpts_gw"].fillna(0)
     eligible["now_cost"] = eligible["now_cost"].fillna(0).astype(int)
     if len(eligible) < 15:
@@ -1602,6 +1611,10 @@ def solve_free_hit_squad(all_players_df, xpts_map, gw_id, budget=1000):
         prob += lpSum(x[pid] for pid in pids if pv[pid_map[pid]] == pos_id) == cnt
     for tid in set(tv):
         prob += lpSum(x[pid] for pid in pids if tv[pid_map[pid]] == tid) <= 3
+    # Locked players must be in squad
+    for pid in pids:
+        if pid in locked_ids:
+            prob += x[pid] == 1
     try:
         prob.solve(PULP_CBC_CMD(msg=0, timeLimit=30))
     except Exception:
@@ -1613,14 +1626,13 @@ def solve_free_hit_squad(all_players_df, xpts_map, gw_id, budget=1000):
 
 
 def solve_wildcard_squad(all_players_df, xpts_map, planning_gw, n_future, budget=1000,
-                         team_fixture_counts=None):
+                         team_fixture_counts=None, locked_ids=None):
     """
     Wildcard: best 15-man squad optimised for total xPts over remaining GWs,
-    WITH blank-awareness — ensures at least 11 players have a fixture in every GW.
-
-    This prevents the solver from picking 15 players from teams that blank in GW31
-    just because they have great fixtures in GWs 30, 32-35.
+    with per-GW XI awareness and locked player support.
     """
+    if locked_ids is None:
+        locked_ids = set()
     gw_range = list(range(planning_gw, planning_gw + n_future))
 
     eligible = all_players_df[
@@ -1628,11 +1640,28 @@ def solve_wildcard_squad(all_players_df, xpts_map, planning_gw, n_future, budget
         (all_players_df["status"].isin(["a", "d", ""]))
     ].copy()
 
+    # Include locked players even if they fail filters
+    if locked_ids:
+        locked_players = all_players_df[all_players_df["id"].isin(locked_ids)]
+        eligible = pd.concat([eligible, locked_players]).drop_duplicates(subset="id")
+
     # Calculate total xPts across horizon
     eligible["xpts_rem"] = eligible["id"].map(
         lambda pid: sum(xpts_map.get(pid, {}).get(gw, 0) for gw in gw_range)
     )
     eligible = eligible[eligible["xpts_rem"] > 0].copy()
+
+    # Re-include locked players even if xpts_rem is 0 (they might blank but user wants them)
+    if locked_ids:
+        locked_missing = all_players_df[
+            (all_players_df["id"].isin(locked_ids)) &
+            (~all_players_df["id"].isin(eligible["id"]))
+        ].copy()
+        if len(locked_missing) > 0:
+            locked_missing["xpts_rem"] = locked_missing["id"].map(
+                lambda pid: sum(xpts_map.get(pid, {}).get(gw, 0) for gw in gw_range)
+            )
+            eligible = pd.concat([eligible, locked_missing]).drop_duplicates(subset="id")
     eligible["xpts_rem"] = eligible["xpts_rem"].fillna(0)
     eligible["now_cost"] = eligible["now_cost"].fillna(0).astype(int)
     if len(eligible) < 15:
@@ -1720,6 +1749,11 @@ def solve_wildcard_squad(all_players_df, xpts_map, planning_gw, n_future, budget
     for tid in set(tv):
         prob += lpSum(x[pid] for pid in pids if tv[pid_map[pid]] == tid) <= 3
 
+    # Locked players must be in squad
+    for pid in pids:
+        if pid in locked_ids:
+            prob += x[pid] == 1
+
     try:
         prob.solve(PULP_CBC_CMD(msg=0, timeLimit=60))
     except Exception:
@@ -1801,7 +1835,7 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
             pre_fh_squad = current_squad.copy()
             total_val = int(current_bank + current_squad["now_cost"].sum())
             fh_pool = all_players_df[~all_players_df["id"].isin(banned_ids)] if banned_ids else all_players_df
-            fh_squad = solve_free_hit_squad(fh_pool, xpts_map, gw, total_val)
+            fh_squad = solve_free_hit_squad(fh_pool, xpts_map, gw, total_val, locked_ids=locked_ids)
             if fh_squad is not None:
                 gw_entry["squad"] = fh_squad
                 xi, bench = solve_best_xi_for_gw(fh_squad, xpts_map, gw)
@@ -1824,7 +1858,8 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
             total_val = int(current_bank + current_squad["now_cost"].sum())
             wc_pool = all_players_df[~all_players_df["id"].isin(banned_ids)] if banned_ids else all_players_df
             wc_squad = solve_wildcard_squad(wc_pool, xpts_map, gw, n_gws - i, total_val,
-                                               team_fixture_counts=team_fixture_counts)
+                                               team_fixture_counts=team_fixture_counts,
+                                               locked_ids=locked_ids)
             if wc_squad is not None:
                 current_squad = wc_squad
                 gw_entry["squad"] = wc_squad
@@ -2214,10 +2249,10 @@ def main():
                     lock_col, ban_col = st.columns(2)
                     with lock_col:
                         planner_locked = st.multiselect(
-                            "🔒 Lock (don't sell these)",
-                            options=list(squad_labels.keys()),
-                            format_func=lambda pid: squad_labels.get(pid, str(pid)),
-                            placeholder="Players to keep...",
+                            "🔒 Lock (must be in squad)",
+                            options=list(planner_labels.keys()),
+                            format_func=lambda pid: planner_labels.get(pid, str(pid)),
+                            placeholder="Players to always include...",
                             key="planner_lock",
                         )
                     with ban_col:
