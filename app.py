@@ -1875,14 +1875,12 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
             continue
 
         # === NORMAL / TC / BB ===
-        # Use up to all available FTs, plus hits if gain > 4pts
         transfers_made = []
         transfers_ft_used = 0
         total_hit = 0
         recently_sold = set()
 
-        # The horizon shrinks as we move through GWs:
-        # GW30 transfer considers GW30-35, GW31 considers GW31-35, etc.
+        # The horizon shrinks as we move through GWs
         horizon_end = planning_gw_id + n_gws
 
         # Filter out banned players from the candidate pool
@@ -1891,9 +1889,61 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
         # Locked players can't be sold — add them to exclude set
         transfer_exclude = set(locked_ids)
 
+        # === FORCE LOCKED PLAYERS IN ===
+        # If locked players aren't in the current squad, buy them first
+        # by selling the worst player in the same position
+        squad_ids = set(current_squad["id"].tolist())
+        locked_to_buy = locked_ids - squad_ids
+        if locked_to_buy and i == 0:  # only force buys in the first GW of the plan
+            for lock_pid in locked_to_buy:
+                lock_player = all_players_df[all_players_df["id"] == lock_pid]
+                if len(lock_player) == 0:
+                    continue
+                lock_p = lock_player.iloc[0]
+                lock_pos = lock_p["pos_id"]
+                lock_cost = lock_p["now_cost"]
+
+                # Find the worst player in the same position to sell (not locked)
+                squad_same_pos = current_squad[
+                    (current_squad["pos_id"] == lock_pos) &
+                    (~current_squad["id"].isin(locked_ids))
+                ].copy()
+                if len(squad_same_pos) == 0:
+                    continue
+
+                # Add horizon xPts for comparison
+                squad_same_pos["xpts_h"] = squad_same_pos["id"].map(
+                    lambda pid: sum(xpts_map.get(pid, {}).get(g, 0) for g in range(gw, horizon_end))
+                )
+                worst = squad_same_pos.loc[squad_same_pos["xpts_h"].idxmin()]
+                sell_price = calculate_selling_price(
+                    worst["id"], worst["now_cost"],
+                    current_purchase, current_selling
+                )
+
+                # Check if we can afford it
+                if current_bank + sell_price >= lock_cost:
+                    # Make the transfer
+                    transfers_made.append({
+                        "out": worst.to_dict(),
+                        "in": lock_p.to_dict(),
+                        "xpts_gain": 0,  # forced transfer
+                        "xpts_gw_gain": 0,
+                        "new_bank": int(current_bank + sell_price - lock_cost),
+                    })
+                    recently_sold.add(worst["id"])
+                    current_squad = current_squad[current_squad["id"] != worst["id"]]
+                    current_squad = pd.concat([current_squad, lock_player.iloc[:1]], ignore_index=True)
+                    current_bank = int(current_bank + sell_price - lock_cost)
+                    current_purchase[lock_pid] = lock_cost
+                    if worst["id"] in current_selling:
+                        del current_selling[worst["id"]]
+                    transfers_ft_used += 1
+
         # Keep finding improving transfers until no more gains
         # Cap at FTs + 2 hits max (so worst case is -8, never -12 or more)
-        max_transfers = min(current_ft + 2, 7)
+        remaining_ft = max(current_ft - transfers_ft_used, 0)
+        max_transfers = min(remaining_ft + 2, 7)
         for t_num in range(max_transfers):
             transfer = find_best_single_transfer_for_gw(
                 current_squad, transfer_pool, current_bank,
