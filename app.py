@@ -752,27 +752,34 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
             defcon_per90 = float(p.get("defcon_per90", 0) or 0)
             if defcon_per90 > 0 and pos in [2, 3, 4] and nineties >= 3:
                 # defcon_per90 from FPL API = DC points earned per 90 (0-2 scale)
-                # A player with defcon_per90 of 2.0 earns DC in every full game
-                # A player with defcon_per90 of 1.0 earns DC in ~50% of games
                 #
-                # Real-world rates (from 2025/26 data):
-                #   Elite DC earners (Tarkowski, Senesi): ~60-70% of games
-                #   Good DC earners (most CBs): ~30-50%
-                #   Occasional (attacking DEFs): ~10-20%
-                #   CDMs (Caicedo, Rice): ~20-35%
-                #   Other MIDs/FWDs: ~5-15%
+                # Position-specific scaling:
+                # DEFs need 10 CBIT — CBs hit this regularly (30-70% of games)
+                # MIDs need 12 CBIRT — only elite CDMs hit this (15-35% of games)
+                # FWDs need 12 CBIRT — almost never hit this (<10% of games)
                 #
-                # Apply a conservative conversion with diminishing returns
-                # to avoid over-projecting
-                raw_prob = defcon_per90 / 2.0  # 0-1 scale
-                # Apply square root dampening — reduces high values more gently
-                # 1.0 -> 1.0, 0.8 -> 0.89, 0.5 -> 0.71, 0.3 -> 0.55
-                # Then scale down by 0.6 to be conservative
-                defcon_prob = min((raw_prob ** 0.5) * 0.6, 0.75)  # hard cap at 75%
+                # The API's defcon_per90 already reflects actual DC points earned,
+                # but we still need position-specific dampening because:
+                # 1. MIDs/FWDs have a higher threshold (12 vs 10)
+                # 2. Their rates are less stable/predictable
+                # 3. We want to avoid over-projecting for non-defensive players
 
-                # Mild fixture adjustment (±10% based on opponent attack)
+                raw_prob = defcon_per90 / 2.0  # 0-1 scale
+
+                if pos == 2:  # DEF
+                    # Conservative but fair — CBs are the primary DefCon earners
+                    defcon_prob = min((raw_prob ** 0.5) * 0.6, 0.70)
+                elif pos == 3:  # MID
+                    # Much more conservative — only elite CDMs earn DC regularly
+                    # Most MIDs (attackers, wingers, AMs) almost never hit 12 CBIRT
+                    defcon_prob = min((raw_prob ** 0.5) * 0.35, 0.40)
+                else:  # FWD (pos == 4)
+                    # Extremely rare — almost no forwards hit 12 CBIRT
+                    defcon_prob = min((raw_prob ** 0.5) * 0.15, 0.20)
+
+                # Mild fixture adjustment
                 defcon_prob *= (0.9 + 0.1 * opp_atk_str)
-                defcon_prob = min(defcon_prob, 0.75)
+                defcon_prob = min(defcon_prob, 0.70 if pos == 2 else 0.40 if pos == 3 else 0.20)
 
                 defcon_xpts = 2.0 * defcon_prob * full_game_prob
                 xpts += defcon_xpts
