@@ -473,6 +473,8 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
     league_avg_goals = 1.35
 
     xpts_all = {}
+    xpts_breakdown = {}  # {pid: {gw: {component: value}}}
+
     for _, p in players_df.iterrows():
         pid = p["id"]
         pos = p["pos_id"]
@@ -795,6 +797,34 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
             gw_xpts_so_far = player_gw_xpts.get(gw, 0)
             player_gw_xpts[gw] = round(gw_xpts_so_far + max(xpts, 0), 2)
 
+            # Store breakdown for this fixture
+            if pid not in xpts_breakdown:
+                xpts_breakdown[pid] = {}
+            if gw not in xpts_breakdown[pid]:
+                xpts_breakdown[pid][gw] = {
+                    "opponent": opp_short,
+                    "home": fix["home"],
+                    "xg_per90": round(xg_per90, 3),
+                    "xa_per90": round(xa_per90, 3),
+                    "adj_xg": round(adj_xg, 3),
+                    "adj_xa": round(adj_xa, 3),
+                    "play_prob": round(play_prob, 2),
+                    "full_game_prob": round(full_game_prob, 2),
+                    "expected_90s": round(expected_90s, 2),
+                    "cs_prob": round(cs_prob, 3),
+                    "opp_def_str": round(opp_def_str, 3),
+                    "team_atk_str": round(team_atk_str, 3),
+                    "opp_atk_str": round(opp_atk_str, 3),
+                    "appearance_pts": round(2.0 * full_game_prob + 1.0 * max(play_prob - full_game_prob, 0), 2),
+                    "goal_pts": round(adj_xg * expected_90s * PTS_GOAL.get(pos, 4), 2),
+                    "assist_pts": round(adj_xa * expected_90s * PTS_ASSIST, 2),
+                    "cs_pts": round(cs_prob * PTS_CS.get(pos, 0) * full_game_prob, 2),
+                    "bonus_pts": round(PTS_BONUS_AVG * play_prob, 2),
+                    "conceded_pts": round(-(league_avg_goals * opp_atk_str * (1.1 if not fix["home"] else 1.0) * 0.5 * full_game_prob), 2) if pos in [1, 2] else 0,
+                    "defcon_pts": round(defcon_xpts, 2) if defcon_per90 > 0 and pos in [2, 3, 4] and nineties >= 3 else 0,
+                    "total": round(max(xpts, 0), 2),
+                }
+
         # Apply blank GW override
         # Blank GW (0 fixtures) = 0 xPts — fixture loop won't have added anything,
         # but we set explicitly to be safe.
@@ -811,7 +841,7 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
         # Total xPts over next 6 GWs
         xpts_all[pid] = player_gw_xpts
 
-    return xpts_all
+    return xpts_all, xpts_breakdown
 
 
 # ============================================================
@@ -1122,7 +1152,7 @@ def enrich_data(bootstrap, fixtures, team_odds):
     elo_ratings, elo_err = load_club_elo()
 
     # Build xPts model (uses planning_gw_id, so only future fixtures)
-    xpts_map = build_xpts_model(df, team_odds, teams, fixtures, gw_id,
+    xpts_map, xpts_breakdown = build_xpts_model(df, team_odds, teams, fixtures, gw_id,
                                  form_xg_data=form_xg_data,
                                  team_fixture_counts=team_fixture_counts,
                                  elo_ratings=elo_ratings)
@@ -1147,7 +1177,7 @@ def enrich_data(bootstrap, fixtures, team_odds):
         lambda r: round(r["xpts_total"] / max(r["price"], 1), 2), axis=1
     )
 
-    return df, teams, current_gw, planning_gw_id, upcoming, fixtures, xpts_map, team_fixture_counts
+    return df, teams, current_gw, planning_gw_id, upcoming, fixtures, xpts_map, team_fixture_counts, xpts_breakdown
 
 
 # ============================================================
@@ -1190,21 +1220,33 @@ def fetch_manager_team(manager_id, current_gw_id):
 
             # Calculate free transfers available for NEXT gameweek
             # Logic: start with 1 FT per GW, can bank up to max 5
-            # We look at the last few GWs to count how many were banked
-            ft = 1  # everyone gets 1 at start of season
+            # We look at all GWs to count how many were banked
+            #
+            # Important: the team's first GW (started_event) doesn't bank a FT
+            # even if event_transfers = 0, because that's the initial squad setup
+            started_event = entry.get("started_event", 1)
+
+            ft = 1  # everyone gets 1 at start
             for gw_data in current_hist:
+                gw_number = gw_data.get("event", 0)
                 transfers_made = gw_data.get("event_transfers", 0)
                 transfers_cost = gw_data.get("event_transfers_cost", 0)
 
+                # Skip the GW the team was created — no FT banking on first GW
+                if gw_number <= started_event:
+                    ft = 1
+                    continue
+
                 if transfers_cost > 0:
-                    # They took hits: they used all FTs + some extra
-                    ft = 1  # reset to 1 for next GW (used everything + more)
+                    # They took hits: used all FTs + some extra, reset to 1
+                    ft = 1
                 elif transfers_made == 0:
                     # Banked a FT
                     ft = min(ft + 1, 5)
                 elif transfers_made <= ft:
                     # Used some/all FTs without a hit
-                    ft = max(1, ft - transfers_made + 1)  # +1 for the new GW's FT
+                    remaining = ft - transfers_made
+                    ft = min(remaining + 1, 5)  # +1 for the new GW's FT
                 else:
                     ft = 1
 
@@ -2089,7 +2131,7 @@ def main():
     elo_status = f"✅ {len(elo_check)} teams" if elo_check else f"⚠️ {elo_check_err or 'Unavailable'}"
 
     with st.spinner("Building xPts model & enriching data..."):
-        df, teams, current_gw, planning_gw_id, upcoming_map, fixtures_list, xpts_map, team_fixture_counts = enrich_data(
+        df, teams, current_gw, planning_gw_id, upcoming_map, fixtures_list, xpts_map, team_fixture_counts, xpts_breakdown = enrich_data(
             bootstrap, fixtures_raw, team_odds
         )
 
@@ -2817,7 +2859,65 @@ def main():
         sd = sd.reset_index(drop=True)
         sd.index += 1
         st.dataframe(sd, use_container_width=True, height=700)
-        st.caption(f"Showing {min(80, len(fl))} of {len(fl)} players · xPts model blends FPL xG/xA + betting odds")
+        st.caption(f"Showing {min(80, len(fl))} of {len(fl)} players · xPts model blends FPL xG/xA + betting odds + Club Elo + DefCon")
+
+        # === xPts BREAKDOWN INSPECTOR ===
+        st.markdown("")
+        st.markdown("**🔬 xPts Breakdown Inspector**")
+        inspect_labels = {
+            row["id"]: f"{row['name']} ({row['team']}, {row['pos']}, £{row['price']:.1f}m)"
+            for _, row in active.sort_values("xpts_total", ascending=False).head(200).iterrows()
+        }
+        inspect_pid = st.selectbox(
+            "Select a player to inspect",
+            options=list(inspect_labels.keys()),
+            format_func=lambda pid: inspect_labels.get(pid, str(pid)),
+            key="inspect_player",
+        )
+
+        if inspect_pid and inspect_pid in xpts_breakdown:
+            player_bd = xpts_breakdown[inspect_pid]
+            player_row = df[df["id"] == inspect_pid].iloc[0] if len(df[df["id"] == inspect_pid]) > 0 else None
+
+            if player_row is not None:
+                st.markdown(
+                    f"<span style='color:#8892a8;font-size:0.8rem;'>"
+                    f"{player_row['name']} · {player_row['team']} · {player_row['pos']} · "
+                    f"£{player_row['price']:.1f}m · {player_row['minutes']} mins · "
+                    f"xG/90: {player_row['xg_per90']:.3f} · xA/90: {player_row['xa_per90']:.3f} · "
+                    f"DefCon/90: {player_row.get('defcon_per90', 0):.2f}"
+                    f"</span>",
+                    unsafe_allow_html=True,
+                )
+
+            for gw in sorted(player_bd.keys()):
+                bd = player_bd[gw]
+                venue = "🏠 Home" if bd["home"] else "✈️ Away"
+                st.markdown(
+                    f"<div style='background:#1a1e2e;border-radius:8px;padding:0.7rem;margin:0.4rem 0;'>"
+                    f"<span style='color:#f02d6e;font-weight:700;'>GW{gw}</span> "
+                    f"<span style='color:#8892a8;'>vs {bd['opponent']} {venue}</span> "
+                    f"<span style='color:#34d399;font-weight:700;font-size:1.1rem;'>"
+                    f"= {bd['total']} xPts</span><br>"
+                    f"<span style='color:#5a6580;font-size:0.75rem;'>"
+                    f"Appearance: {bd['appearance_pts']} · "
+                    f"Goals: {bd['goal_pts']} (adj xG: {bd['adj_xg']}) · "
+                    f"Assists: {bd['assist_pts']} (adj xA: {bd['adj_xa']}) · "
+                    f"CS: {bd['cs_pts']} (prob: {bd['cs_prob']:.0%}) · "
+                    f"Bonus: {bd['bonus_pts']} · "
+                    f"Conceded: {bd['conceded_pts']} · "
+                    f"DefCon: {bd['defcon_pts']}<br>"
+                    f"Play prob: {bd['play_prob']:.0%} · "
+                    f"Full game: {bd['full_game_prob']:.0%} · "
+                    f"Exp 90s: {bd['expected_90s']} · "
+                    f"Opp def str: {bd['opp_def_str']} · "
+                    f"Team atk str: {bd['team_atk_str']} · "
+                    f"Opp atk str: {bd['opp_atk_str']}"
+                    f"</span></div>",
+                    unsafe_allow_html=True,
+                )
+        elif inspect_pid:
+            st.info("No breakdown available for this player (may not have enough minutes or upcoming fixtures).")
 
     # ==================== OPTIMAL SQUAD (MILP) ====================
     with tab4:
