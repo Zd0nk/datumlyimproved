@@ -589,8 +589,17 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
         # ============================================================
         # SET PIECE TAKER BONUS
         # ============================================================
-        # Penalty takers get a significant xG boost (~0.76 xG per pen, ~5-6 pens/season)
+        # NOTE on penalties: FPL's expected_goals_per_90 ALREADY includes
+        # penalties taken this season. So a pen taker's xG/90 naturally
+        # reflects their penalty duty. We do NOT add a separate pen xG boost
+        # to avoid double-counting.
+        #
+        # However, we keep a small boost (+0.015) as a forward-looking signal
+        # for penalty ORDER — the FPL API confirms who is on pens even if
+        # they haven't taken many yet this season.
+        #
         # Corner/FK takers get an xA boost (more delivery opportunities)
+        # and direct FK takers get a small xG boost.
         pen_order = int(p.get("penalties_order", 0) or 0)
         corner_order = int(p.get("corners_order", 0) or 0)
         fk_order = int(p.get("freekicks_order", 0) or 0)
@@ -599,16 +608,14 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
         set_piece_xa_boost = 0.0
 
         if pen_order == 1:
-            # First-choice penalty taker: ~0.05 xG/90 boost (roughly 5 pens/season)
-            pen_xg_boost = 0.05
+            # Small forward-looking boost only (FPL xG already includes pen xG)
+            pen_xg_boost = 0.015
         elif pen_order == 2:
-            pen_xg_boost = 0.015  # backup pen taker, occasional
+            pen_xg_boost = 0.005
 
         if corner_order == 1:
-            # First-choice corner taker: ~0.03 xA/90 boost
             set_piece_xa_boost += 0.03
         if fk_order == 1:
-            # First-choice FK taker: ~0.02 xA/90 boost (+ small xG from direct FKs)
             set_piece_xa_boost += 0.02
             xg_per90 += 0.01  # direct FK goal threat
 
