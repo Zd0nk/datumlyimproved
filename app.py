@@ -163,6 +163,7 @@ def load_betting_odds():
         return None, str(e)
 
 
+
 @st.cache_data(ttl=7200)
 def load_club_elo():
     """Source 3: Club Elo ratings — dynamic team strength from clubelo.com."""
@@ -174,9 +175,7 @@ def load_club_elo():
         df = pd.read_csv(StringIO(resp.text), sep=",")
         if len(df) == 0:
             return None, "Empty response"
-        # Filter to English teams only (Country == ENG, Level 1)
         eng = df[(df["Country"] == "ENG") & (df["Level"] == 1)].copy()
-        # Build lookup: club name -> Elo rating
         elo_map = {}
         for _, row in eng.iterrows():
             elo_map[row["Club"]] = float(row["Elo"])
@@ -185,7 +184,6 @@ def load_club_elo():
         return None, str(e)
 
 
-# Club Elo name -> FPL short name mapping
 ELO_NAME_MAP = {
     "Arsenal": "ARS", "Aston Villa": "AVL", "Bournemouth": "BOU",
     "Brentford": "BRE", "Brighton": "BHA", "Chelsea": "CHE",
@@ -199,6 +197,63 @@ ELO_NAME_MAP = {
     "Middlesbrough": "MID", "Luton": "LUT",
 }
 
+ODDS_API_KEY = "e6df27ee56e4f85f1b20b194e4ffd080"
+
+ODDS_API_TEAM_MAP = {
+    "Arsenal": "ARS", "Aston Villa": "AVL", "AFC Bournemouth": "BOU",
+    "Brentford": "BRE", "Brighton and Hove Albion": "BHA", "Chelsea": "CHE",
+    "Crystal Palace": "CRY", "Everton": "EVE", "Fulham": "FUL",
+    "Ipswich Town": "IPS", "Leicester City": "LEI", "Liverpool": "LIV",
+    "Manchester City": "MCI", "Manchester United": "MUN", "Newcastle United": "NEW",
+    "Nottingham Forest": "NFO", "Southampton": "SOU", "Tottenham Hotspur": "TOT",
+    "West Ham United": "WHU", "Wolverhampton Wanderers": "WOL",
+    "Leeds United": "LEE", "Burnley": "BUR", "Sunderland": "SUN",
+    "Sheffield United": "SHU",
+}
+
+
+@st.cache_data(ttl=21600)
+def load_live_odds():
+    """Source 4: The Odds API — live fixture-specific match odds."""
+    if not ODDS_API_KEY:
+        return None, "No API key"
+    try:
+        url = f"https://api.the-odds-api.com/v4/sports/soccer_epl/odds?apiKey={ODDS_API_KEY}&regions=uk&markets=h2h&oddsFormat=decimal"
+        resp = requests.get(url, timeout=20)
+        if resp.status_code == 401: return None, "Invalid API key"
+        if resp.status_code == 429: return None, "Rate limit exceeded"
+        if resp.status_code != 200: return None, f"HTTP {resp.status_code}"
+        remaining = resp.headers.get("x-requests-remaining", "?")
+        data = resp.json()
+        if not data: return None, "No upcoming fixtures"
+        fixture_odds = {}
+        for event in data:
+            home_team, away_team = event.get("home_team", ""), event.get("away_team", "")
+            home_fpl, away_fpl = ODDS_API_TEAM_MAP.get(home_team), ODDS_API_TEAM_MAP.get(away_team)
+            if not home_fpl or not away_fpl: continue
+            h_list, d_list, a_list = [], [], []
+            for bookie in event.get("bookmakers", []):
+                for market in bookie.get("markets", []):
+                    if market.get("key") != "h2h": continue
+                    oc = {o["name"]: o["price"] for o in market.get("outcomes", [])}
+                    if home_team in oc and away_team in oc and "Draw" in oc:
+                        h_list.append(oc[home_team]); d_list.append(oc["Draw"]); a_list.append(oc[away_team])
+            if h_list:
+                ah, ad, aa = np.mean(h_list), np.mean(d_list), np.mean(a_list)
+                ornd = (1/ah + 1/ad + 1/aa)
+                hp, dp, ap = (1/ah)/ornd, (1/ad)/ornd, (1/aa)/ornd
+                fixture_odds[(home_fpl, away_fpl)] = {
+                    "home_win_prob": round(hp, 3), "draw_prob": round(dp, 3), "away_win_prob": round(ap, 3),
+                    "home_cs_prob": round(hp*0.35 + dp*0.55, 3), "away_cs_prob": round(ap*0.30 + dp*0.55, 3),
+                    "home_attack_str": round((hp*1.8 + dp*0.8 + ap*0.5)/1.3, 3),
+                    "away_attack_str": round((ap*1.5 + dp*0.8 + hp*0.5)/1.3, 3),
+                    "home_defence_str": round((ap*1.5 + dp*0.8 + hp*0.5)/1.3, 3),
+                    "away_defence_str": round((hp*1.8 + dp*0.8 + ap*0.5)/1.3, 3),
+                    "n_bookmakers": len(h_list),
+                }
+        return {"fixtures": fixture_odds, "remaining": remaining}, None
+    except Exception as e:
+        return None, str(e)
 
 @st.cache_data(ttl=3600)
 def load_recent_gw_live_data(current_gw_id, n_recent=7):
@@ -420,7 +475,8 @@ TEAM_NAME_MAP = {
 
 
 def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
-                     form_xg_data=None, team_fixture_counts=None, elo_ratings=None):
+                     form_xg_data=None, team_fixture_counts=None, elo_ratings=None,
+                     live_odds=None):
     """
     Source 3: Custom expected points model.
 
@@ -632,33 +688,51 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
             opp_team = teams_map.get(fix["opp_id"], {})
             opp_short = opp_team.get("short_name", "???")
 
-            # Get opponent defensive strength from odds
-            opp_odds = odds_by_fpl.get(opp_short, {})
-            team_attack_odds = odds_by_fpl.get(team_short, {})
+            # === LIVE FIXTURE-SPECIFIC ODDS (The Odds API) ===
+            # Check if we have real bookmaker odds for THIS specific match
+            live_fixture = None
+            if live_odds:
+                fixture_odds = live_odds.get("fixtures", {})
+                if fix["home"]:
+                    live_fixture = fixture_odds.get((team_short, opp_short))
+                else:
+                    live_fixture = fixture_odds.get((opp_short, team_short))
 
-            # Get Elo ratings for both teams
-            team_elo = elo_by_fpl.get(team_short, avg_elo)
-            opp_elo = elo_by_fpl.get(opp_short, avg_elo)
-
-            # Elo-derived strength (normalised: 1.0 = average)
-            # Higher Elo = stronger team
-            team_elo_str = team_elo / avg_elo if avg_elo > 0 else 1.0
-            opp_elo_str = opp_elo / avg_elo if avg_elo > 0 else 1.0
-
-            # Blend odds-based and Elo-based opponent strength
-            # Elo is more dynamic (updates after every match), odds are market-informed
-            opp_def_str_odds = opp_odds.get("defence_strength", 1.0)
-            team_atk_str_odds = team_attack_odds.get("attack_strength", 1.0)
-
-            # If we have Elo data, blend 50/50 with odds; otherwise use odds only
-            if elo_by_fpl:
-                # Elo attack proxy: team_elo_str (strong team scores more)
-                # Elo defence proxy: 1/opp_elo_str (weak opponent concedes more)
-                opp_def_str = (opp_def_str_odds * 0.5) + ((1.0 / max(opp_elo_str, 0.5)) * 0.5)
-                team_atk_str = (team_atk_str_odds * 0.5) + (team_elo_str * 0.5)
+            if live_fixture:
+                # Use fixture-specific odds — much more accurate than season averages
+                if fix["home"]:
+                    team_atk_str = live_fixture["home_attack_str"]
+                    opp_def_str = live_fixture["away_defence_str"]
+                    opp_atk_str_fix = live_fixture["away_attack_str"]
+                    cs_prob_from_live = live_fixture["home_cs_prob"]
+                else:
+                    team_atk_str = live_fixture["away_attack_str"]
+                    opp_def_str = live_fixture["home_defence_str"]
+                    opp_atk_str_fix = live_fixture["home_attack_str"]
+                    cs_prob_from_live = live_fixture["away_cs_prob"]
             else:
-                opp_def_str = opp_def_str_odds
-                team_atk_str = team_atk_str_odds
+                # Fallback: season-average odds + Elo blend
+                opp_odds = odds_by_fpl.get(opp_short, {})
+                team_attack_odds = odds_by_fpl.get(team_short, {})
+
+                # Get Elo ratings for both teams
+                team_elo = elo_by_fpl.get(team_short, avg_elo)
+                opp_elo = elo_by_fpl.get(opp_short, avg_elo)
+                team_elo_str = team_elo / avg_elo if avg_elo > 0 else 1.0
+                opp_elo_str = opp_elo / avg_elo if avg_elo > 0 else 1.0
+
+                opp_def_str_odds = opp_odds.get("defence_strength", 1.0)
+                team_atk_str_odds = team_attack_odds.get("attack_strength", 1.0)
+
+                if elo_by_fpl:
+                    opp_def_str = (opp_def_str_odds * 0.5) + ((1.0 / max(opp_elo_str, 0.5)) * 0.5)
+                    team_atk_str = (team_atk_str_odds * 0.5) + (team_elo_str * 0.5)
+                else:
+                    opp_def_str = opp_def_str_odds
+                    team_atk_str = team_atk_str_odds
+
+                opp_atk_str_fix = None  # will use season average below
+                cs_prob_from_live = None
 
             # Scale factor: easier opponent = higher xG
             # opp_def_str > 1 means they concede more → easier
@@ -669,8 +743,15 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
             adj_xa = xa_per90 * scale * home_boost
 
             # Clean sheet probability
-            opp_atk_str = opp_odds.get("attack_strength", 1.0)
-            team_def_str = team_attack_odds.get("defence_strength", 1.0)
+            # Use live fixture odds if available, otherwise season averages
+            if opp_atk_str_fix is not None:
+                opp_atk_str = opp_atk_str_fix
+            else:
+                opp_odds_season = odds_by_fpl.get(opp_short, {})
+                opp_atk_str = opp_odds_season.get("attack_strength", 1.0)
+
+            team_odds_season = odds_by_fpl.get(team_short, {})
+            team_def_str = team_odds_season.get("defence_strength", 1.0)
 
             # Base CS from odds — use form-weighted xGC if available, else season
             actual_xgc_per90 = float(p.get("xgc_per90", 0) or 0)
@@ -688,12 +769,16 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
                 base_cs *= (1.0 / max(team_def_str, 0.5))
                 base_cs = min(base_cs, 0.50)
 
-            # Blend with odds-derived CS if available (but don't override Poisson)
-            team_cs_from_odds = team_attack_odds.get("cs_prob")
-            if team_cs_from_odds and actual_xgc_per90 == 0:
-                cs_prob = (base_cs * 0.4 + team_cs_from_odds * 0.6)
+            # Blend with odds-derived CS if available
+            if cs_prob_from_live is not None:
+                # Live fixture odds CS is the most accurate — weight heavily
+                cs_prob = (base_cs * 0.3 + cs_prob_from_live * 0.7)
             else:
-                cs_prob = base_cs
+                team_cs_from_odds = team_odds_season.get("cs_prob")
+                if team_cs_from_odds and actual_xgc_per90 == 0:
+                    cs_prob = (base_cs * 0.4 + team_cs_from_odds * 0.6)
+                else:
+                    cs_prob = base_cs
 
             # Hard cap — no team keeps a CS more than 50% of the time
             cs_prob = min(cs_prob, 0.50)
@@ -1151,11 +1236,15 @@ def enrich_data(bootstrap, fixtures, team_odds):
     # Load Club Elo ratings
     elo_ratings, elo_err = load_club_elo()
 
+    # Load live fixture-specific odds (The Odds API)
+    live_odds_data, live_odds_err = load_live_odds()
+
     # Build xPts model (uses planning_gw_id, so only future fixtures)
     xpts_map, xpts_breakdown = build_xpts_model(df, team_odds, teams, fixtures, gw_id,
                                  form_xg_data=form_xg_data,
                                  team_fixture_counts=team_fixture_counts,
-                                 elo_ratings=elo_ratings)
+                                 elo_ratings=elo_ratings,
+                                 live_odds=live_odds_data)
 
     # Add xPts columns
     # xpts_next_gw = xPts for the specific next gameweek (planning_gw_id)
@@ -2130,6 +2219,15 @@ def main():
     elo_check, elo_check_err = load_club_elo()
     elo_status = f"✅ {len(elo_check)} teams" if elo_check else f"⚠️ {elo_check_err or 'Unavailable'}"
 
+    # Check live odds status
+    live_check, live_check_err = load_live_odds()
+    if live_check:
+        n_fixtures = len(live_check.get("fixtures", {}))
+        remaining = live_check.get("remaining", "?")
+        live_status = f"✅ {n_fixtures} fixtures ({remaining} req left)"
+    else:
+        live_status = f"⚠️ {live_check_err or 'Unavailable'}"
+
     with st.spinner("Building xPts model & enriching data..."):
         df, teams, current_gw, planning_gw_id, upcoming_map, fixtures_list, xpts_map, team_fixture_counts, xpts_breakdown = enrich_data(
             bootstrap, fixtures_raw, team_odds
@@ -2147,8 +2245,8 @@ def main():
             <span class="badge {bc}">{status}</span>
             {f'<span class="badge badge-blue">{planning_str}</span>' if planning_str else ''}
             <span style="color:#5a6580; font-size:0.68rem;">
-                Odds: {odds_status} · Elo: {elo_status} ·
-                {fetch_time.strftime('%d %b %H:%M')} (cached 1hr)
+                Odds: {odds_status} · Elo: {elo_status} · Live: {live_status} ·
+                {fetch_time.strftime('%d %b %H:%M')} (cached)
             </span>
         </div>""", unsafe_allow_html=True)
 
