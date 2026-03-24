@@ -2251,9 +2251,10 @@ def main():
         </div>""", unsafe_allow_html=True)
 
     # === Tabs ===
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "🏠 My Team", "📊 Dashboard", "👥 Player Projections",
-        "⭐ Optimal Squad (MILP)", "🔄 Transfer Planner", "📅 Fixtures"
+        "⭐ Optimal Squad (MILP)", "🔄 Transfer Planner", "📅 Fixtures",
+        "🔬 Backtest"
     ])
 
     active = df[df["minutes"] > 0].copy()
@@ -3237,6 +3238,176 @@ def main():
         fdf = pd.DataFrame(rows).sort_values("Avg FDR").reset_index(drop=True)
         fdf.index += 1
         st.dataframe(fdf, use_container_width=True, height=740)
+
+    # ==================== BACKTEST ====================
+    with tab7:
+        st.markdown(
+            '<div class="section-header">🔬 Model Backtesting '
+            '<span class="source-tag src-model">Accuracy Analysis</span></div>',
+            unsafe_allow_html=True,
+        )
+        st.caption("Compares Datumly's predicted xPts against actual FPL points for recent gameweeks. "
+                    "This tells you how accurate the model is and where it's failing.")
+
+        # Fetch actual points for recent completed GWs
+        events = bootstrap.get("events", [])
+        completed_gws = [e for e in events if e.get("finished") and e.get("id", 0) >= max(1, planning_gw_id - 7)]
+        completed_gws = sorted(completed_gws, key=lambda e: e["id"], reverse=True)[:6]
+
+        if completed_gws and len(active) > 0:
+            if st.button("🔬 Run Backtest", use_container_width=True, type="primary"):
+                headers = {"User-Agent": "FPL-Optimizer/2.0"}
+
+                all_comparisons = []
+                gw_summaries = []
+
+                with st.spinner("Fetching actual points data for recent GWs..."):
+                    for gw_event in completed_gws:
+                        gw_id = gw_event["id"]
+                        try:
+                            resp = requests.get(
+                                f"{FPL_BASE}/event/{gw_id}/live/",
+                                headers=headers, timeout=15,
+                            )
+                            if resp.status_code != 200:
+                                continue
+                            live_data = resp.json()
+                            elements = live_data.get("elements", [])
+
+                            gw_errors = []
+                            for el in elements:
+                                pid = el["id"]
+                                actual_pts = el.get("stats", {}).get("total_points", 0)
+                                predicted_pts = xpts_map.get(pid, {}).get(gw_id, None)
+
+                                if predicted_pts is None or predicted_pts == 0:
+                                    continue
+
+                                # Only compare players who actually played
+                                mins = el.get("stats", {}).get("minutes", 0)
+                                if mins == 0:
+                                    continue
+
+                                player_info = df[df["id"] == pid]
+                                if len(player_info) == 0:
+                                    continue
+                                p = player_info.iloc[0]
+
+                                error = actual_pts - predicted_pts
+                                abs_error = abs(error)
+                                gw_errors.append(abs_error)
+
+                                all_comparisons.append({
+                                    "GW": gw_id,
+                                    "Player": p["name"],
+                                    "Team": p["team"],
+                                    "Pos": p["pos"],
+                                    "Predicted": round(predicted_pts, 1),
+                                    "Actual": actual_pts,
+                                    "Error": round(error, 1),
+                                    "Abs Error": round(abs_error, 1),
+                                })
+
+                            if gw_errors:
+                                gw_summaries.append({
+                                    "GW": gw_id,
+                                    "Players": len(gw_errors),
+                                    "MAE": round(np.mean(gw_errors), 2),
+                                    "Median AE": round(np.median(gw_errors), 2),
+                                    "Within 2pts": f"{sum(1 for e in gw_errors if e <= 2) / len(gw_errors):.0%}",
+                                    "Within 4pts": f"{sum(1 for e in gw_errors if e <= 4) / len(gw_errors):.0%}",
+                                })
+                        except Exception:
+                            continue
+
+                if all_comparisons:
+                    comp_df = pd.DataFrame(all_comparisons)
+                    summ_df = pd.DataFrame(gw_summaries)
+
+                    # Overall metrics
+                    overall_mae = comp_df["Abs Error"].mean()
+                    overall_median = comp_df["Abs Error"].median()
+                    within_2 = (comp_df["Abs Error"] <= 2).mean()
+                    within_4 = (comp_df["Abs Error"] <= 4).mean()
+                    correlation = comp_df["Predicted"].corr(comp_df["Actual"])
+
+                    st.markdown("### Overall Model Accuracy")
+                    mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+                    mc1.metric("MAE", f"{overall_mae:.2f} pts")
+                    mc2.metric("Median Error", f"{overall_median:.2f} pts")
+                    mc3.metric("Within 2pts", f"{within_2:.0%}")
+                    mc4.metric("Within 4pts", f"{within_4:.0%}")
+                    mc5.metric("Correlation", f"{correlation:.3f}")
+
+                    st.markdown(
+                        "<span style='color:#5a6580;font-size:0.75rem;'>"
+                        "MAE (Mean Absolute Error) = average difference between predicted and actual points. "
+                        "Lower is better. A MAE of ~2.5 is good for FPL. "
+                        "Correlation measures how well predicted rankings match actual rankings (1.0 = perfect)."
+                        "</span>",
+                        unsafe_allow_html=True,
+                    )
+
+                    st.markdown("")
+                    st.markdown("### Per-Gameweek Breakdown")
+                    st.dataframe(summ_df, use_container_width=True)
+
+                    # Error by position
+                    st.markdown("")
+                    st.markdown("### Accuracy by Position")
+                    pos_errors = comp_df.groupby("Pos").agg(
+                        Players=("Player", "count"),
+                        MAE=("Abs Error", "mean"),
+                        Median=("Abs Error", "median"),
+                        Avg_Predicted=("Predicted", "mean"),
+                        Avg_Actual=("Actual", "mean"),
+                    ).round(2).reset_index()
+                    pos_errors.columns = ["Position", "Players", "MAE", "Median Error", "Avg Predicted", "Avg Actual"]
+                    st.dataframe(pos_errors, use_container_width=True)
+
+                    # Biggest misses (for debugging)
+                    st.markdown("")
+                    st.markdown("### Biggest Misses (model vs reality)")
+                    biggest = comp_df.nlargest(20, "Abs Error")[
+                        ["GW", "Player", "Team", "Pos", "Predicted", "Actual", "Error"]
+                    ].reset_index(drop=True)
+                    biggest.index += 1
+                    st.dataframe(biggest, use_container_width=True)
+
+                    # Best predictions
+                    st.markdown("")
+                    st.markdown("### Most Accurate Predictions")
+                    best = comp_df.nsmallest(20, "Abs Error")[
+                        ["GW", "Player", "Team", "Pos", "Predicted", "Actual", "Error"]
+                    ].reset_index(drop=True)
+                    best.index += 1
+                    st.dataframe(best, use_container_width=True)
+
+                    # Direction accuracy — did we correctly rank players?
+                    st.markdown("")
+                    st.markdown("### Ranking Accuracy")
+                    st.caption("For each GW, did our top 20 predicted players actually outscore the average?")
+                    for gw_id in sorted(comp_df["GW"].unique()):
+                        gw_data = comp_df[comp_df["GW"] == gw_id]
+                        top20_predicted = gw_data.nlargest(20, "Predicted")
+                        top20_actual_avg = top20_predicted["Actual"].mean()
+                        all_avg = gw_data["Actual"].mean()
+                        edge = top20_actual_avg - all_avg
+                        emoji = "✅" if edge > 0 else "⚠️"
+                        st.markdown(
+                            f"<span style='color:#8892a8;font-size:0.8rem;'>"
+                            f"GW{gw_id}: Top 20 predicted averaged "
+                            f"<span style='color:{'#34d399' if edge > 0 else '#f87171'};font-weight:600;'>"
+                            f"{top20_actual_avg:.1f}pts</span> vs all-player avg "
+                            f"{all_avg:.1f}pts {emoji} "
+                            f"(edge: {'+' if edge > 0 else ''}{edge:.1f}pts)</span>",
+                            unsafe_allow_html=True,
+                        )
+
+                else:
+                    st.warning("Could not generate backtest — no comparison data available.")
+        else:
+            st.info("Need completed gameweeks to run backtest.")
 
     # === Footer ===
     st.markdown("---")
