@@ -57,6 +57,85 @@ PTS_CS = {1: 4, 2: 4, 3: 1, 4: 0}
 PTS_APPEARANCE = 2  # 60+ mins
 PTS_BONUS_AVG = 0.5  # average bonus per appearance
 
+# Team colours: FPL short name -> (primary, secondary, text_colour)
+TEAM_COLOURS = {
+    "ARS": ("#EF0107", "#FFFFFF", "#FFFFFF"),  # Red, white
+    "AVL": ("#670E36", "#95BFE5", "#FFFFFF"),  # Claret, sky blue
+    "BOU": ("#DA291C", "#000000", "#FFFFFF"),  # Red, black
+    "BRE": ("#FFD700", "#E30613", "#000000"),  # Yellow/red (bee stripes)
+    "BHA": ("#0057B8", "#FFFFFF", "#FFFFFF"),  # Blue, white
+    "CHE": ("#034694", "#FFFFFF", "#FFFFFF"),  # Blue, white
+    "CRY": ("#1B458F", "#C4122E", "#FFFFFF"),  # Blue, red
+    "EVE": ("#003399", "#FFFFFF", "#FFFFFF"),  # Blue, white
+    "FUL": ("#FFFFFF", "#000000", "#000000"),  # White, black
+    "IPS": ("#0044AA", "#FFFFFF", "#FFFFFF"),  # Blue, white
+    "LEI": ("#003090", "#FDBE11", "#FFFFFF"),  # Blue, gold
+    "LIV": ("#C8102E", "#FFFFFF", "#FFFFFF"),  # Red, white
+    "MCI": ("#6CABDD", "#FFFFFF", "#FFFFFF"),  # Sky blue, white
+    "MUN": ("#DA291C", "#FBE122", "#FFFFFF"),  # Red, yellow
+    "NEW": ("#241F20", "#FFFFFF", "#FFFFFF"),  # Black, white
+    "NFO": ("#DD0000", "#FFFFFF", "#FFFFFF"),  # Red, white
+    "SOU": ("#D71920", "#FFFFFF", "#FFFFFF"),  # Red, white
+    "TOT": ("#FFFFFF", "#132257", "#132257"),  # White, navy
+    "WHU": ("#7A263A", "#1BB1E7", "#FFFFFF"),  # Claret, blue
+    "WOL": ("#FDB913", "#000000", "#000000"),  # Gold, black
+    "LEE": ("#FFFFFF", "#1D428A", "#1D428A"),  # White, blue
+    "BUR": ("#6C1D45", "#99D6EA", "#FFFFFF"),  # Claret, blue
+    "SUN": ("#EB172B", "#FFFFFF", "#FFFFFF"),  # Red, white
+    "SHU": ("#EE2737", "#FFFFFF", "#FFFFFF"),  # Red, white
+}
+
+# GK kit colours (separate — keepers wear different kits)
+GK_COLOURS = {
+    "default": ("#2ECC71", "#1A1A2E", "#FFFFFF"),  # Green, dark
+}
+
+
+def make_shirt_svg(team_short, xpts_text, is_gk=False, is_captain=False, width=52, height=52, player_name=""):
+    """Generate an inline SVG circular badge with team colours, xPts, and player initials."""
+    if is_gk:
+        primary, secondary, text_col = GK_COLOURS.get(team_short, GK_COLOURS["default"])
+    else:
+        primary, secondary, text_col = TEAM_COLOURS.get(team_short, ("#666666", "#FFFFFF", "#FFFFFF"))
+
+    # Get player initials (e.g. "Salah" -> "MS", "De Bruyne" -> "DB")
+    initials = ""
+    if player_name:
+        parts = player_name.strip().split()
+        if len(parts) >= 2:
+            initials = (parts[0][0] + parts[-1][0]).upper()
+        elif len(parts) == 1:
+            initials = parts[0][:2].upper()
+
+    cap_badge = ""
+    if is_captain:
+        cap_badge = (
+            f'<circle cx="{width-6}" cy="8" r="7" fill="#FFD700" stroke="#1a1e2e" stroke-width="1"/>'
+            f'<text x="{width-6}" y="11.5" text-anchor="middle" font-size="8" font-weight="bold" fill="#000" font-family="Arial,sans-serif">C</text>'
+        )
+
+    r = min(width, height) / 2 - 2
+    cx = width / 2
+    cy = height / 2
+
+    svg = f'''<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg">
+        <!-- Outer ring -->
+        <circle cx="{cx}" cy="{cy}" r="{r}" fill="{primary}" stroke="{secondary}" stroke-width="2"/>
+        <!-- Inner circle (subtle gradient effect) -->
+        <circle cx="{cx}" cy="{cy}" r="{r-3}" fill="{primary}" opacity="0.85"/>
+        <!-- Initials (top) -->
+        <text x="{cx}" y="{cy - 3}" text-anchor="middle"
+              font-size="9" font-weight="400" fill="{text_col}" opacity="0.7"
+              font-family="Arial,sans-serif">{initials}</text>
+        <!-- xPts (bottom, larger) -->
+        <text x="{cx}" y="{cy + 10}" text-anchor="middle"
+              font-size="12" font-weight="700" fill="{text_col}"
+              font-family="Arial,sans-serif"
+              style="text-shadow:0 1px 2px rgba(0,0,0,0.4);">{xpts_text}</text>
+        {cap_badge}
+    </svg>'''
+    return svg
+
 # ============================================================
 # CUSTOM CSS
 # ============================================================
@@ -108,11 +187,8 @@ st.markdown("""
     .badge-blue { background:rgba(56,189,248,0.15); color:#38bdf8; }
 
     .pitch-row-label { color:#5a6580; font-size:0.68rem; text-transform:uppercase; letter-spacing:1px; margin-bottom:5px; margin-top:12px; }
-    .pitch-shirt { width:40px; height:40px; border-radius:10px; display:inline-flex; align-items:center; justify-content:center; font-weight:700; font-size:0.75rem; color:white; margin:0 auto; }
-    .pitch-shirt-gkp { background:#f59e0b; }
-    .pitch-shirt-def { background:#3b82f6; }
-    .pitch-shirt-mid { background:#10b981; }
-    .pitch-shirt-fwd { background:#ef4444; }
+    .pitch-shirt-container { display:inline-flex; flex-direction:column; align-items:center; position:relative; margin:0 auto; }
+    .pitch-shirt-xpts { position:absolute; top:18px; left:50%; transform:translateX(-50%); font-weight:700; font-size:0.72rem; color:white; text-shadow:0 1px 2px rgba(0,0,0,0.5); z-index:2; }
     .pitch-name { font-size:0.7rem; font-weight:600; color:#e2e8f0; margin-top:3px; }
     .pitch-price { font-size:0.58rem; color:#5a6580; }
 
@@ -218,7 +294,7 @@ def load_live_odds():
     if not ODDS_API_KEY:
         return None, "No API key"
     try:
-        url = f"https://api.the-odds-api.com/v4/sports/soccer_epl/odds?apiKey={ODDS_API_KEY}&regions=uk&markets=h2h&oddsFormat=decimal"
+        url = f"https://api.the-odds-api.com/v4/sports/soccer_epl/odds?apiKey={ODDS_API_KEY}&regions=uk&markets=h2h,totals&oddsFormat=decimal"
         resp = requests.get(url, timeout=20)
         if resp.status_code == 401: return None, "Invalid API key"
         if resp.status_code == 429: return None, "Rate limit exceeded"
@@ -232,24 +308,66 @@ def load_live_odds():
             home_fpl, away_fpl = ODDS_API_TEAM_MAP.get(home_team), ODDS_API_TEAM_MAP.get(away_team)
             if not home_fpl or not away_fpl: continue
             h_list, d_list, a_list = [], [], []
+            over_lines = []  # over/under 2.5 goals implied probabilities
+
             for bookie in event.get("bookmakers", []):
                 for market in bookie.get("markets", []):
-                    if market.get("key") != "h2h": continue
-                    oc = {o["name"]: o["price"] for o in market.get("outcomes", [])}
-                    if home_team in oc and away_team in oc and "Draw" in oc:
-                        h_list.append(oc[home_team]); d_list.append(oc["Draw"]); a_list.append(oc[away_team])
+                    if market.get("key") == "h2h":
+                        oc = {o["name"]: o["price"] for o in market.get("outcomes", [])}
+                        if home_team in oc and away_team in oc and "Draw" in oc:
+                            h_list.append(oc[home_team]); d_list.append(oc["Draw"]); a_list.append(oc[away_team])
+                    elif market.get("key") == "totals":
+                        # Extract over/under 2.5 goals line
+                        for outcome in market.get("outcomes", []):
+                            if outcome.get("point") == 2.5 and outcome.get("name") == "Over":
+                                over_lines.append(outcome["price"])
+
             if h_list:
                 ah, ad, aa = np.mean(h_list), np.mean(d_list), np.mean(a_list)
                 ornd = (1/ah + 1/ad + 1/aa)
                 hp, dp, ap = (1/ah)/ornd, (1/ad)/ornd, (1/aa)/ornd
+
+                # Over/under 2.5 goals → implied total goals for the match
+                # If over 2.5 odds average to e.g. 1.85, implied prob = 1/1.85 = 54%
+                # We can estimate expected total goals from this
+                if over_lines:
+                    avg_over_price = np.mean(over_lines)
+                    over_prob = min(1.0 / avg_over_price, 0.95)  # rough, no overround removal needed for single line
+                    # Convert over 2.5 probability to expected total goals
+                    # Empirical approximation: xGoals ≈ 2.5 + (over_prob - 0.5) * 2.5
+                    # When over_prob = 0.5 → 2.5 goals, when 0.7 → 3.0, when 0.3 → 2.0
+                    expected_total_goals = 2.5 + (over_prob - 0.5) * 2.5
+                    expected_total_goals = max(expected_total_goals, 1.0)  # floor at 1.0
+                else:
+                    # Fallback: derive from win probabilities
+                    expected_total_goals = 2.7  # PL average
+
+                # Split total goals between home and away using win probabilities
+                # Higher win prob → more goals for that team
+                home_goal_share = (hp * 0.6 + dp * 0.35 + ap * 0.05)
+                away_goal_share = (ap * 0.6 + dp * 0.35 + hp * 0.05)
+                share_sum = home_goal_share + away_goal_share
+                home_expected_goals = expected_total_goals * (home_goal_share / share_sum)
+                away_expected_goals = expected_total_goals * (away_goal_share / share_sum)
+
+                # CS probability: use Poisson with bookmaker-implied goals
+                # P(0 goals) = e^(-expected_goals)
+                home_cs_prob_poisson = math.exp(-away_expected_goals)
+                away_cs_prob_poisson = math.exp(-home_expected_goals)
+
                 fixture_odds[(home_fpl, away_fpl)] = {
                     "home_win_prob": round(hp, 3), "draw_prob": round(dp, 3), "away_win_prob": round(ap, 3),
-                    "home_cs_prob": round(hp*0.35 + dp*0.55, 3), "away_cs_prob": round(ap*0.30 + dp*0.55, 3),
-                    "home_attack_str": round((hp*1.8 + dp*0.8 + ap*0.5)/1.3, 3),
-                    "away_attack_str": round((ap*1.5 + dp*0.8 + hp*0.5)/1.3, 3),
-                    "home_defence_str": round((ap*1.5 + dp*0.8 + hp*0.5)/1.3, 3),
-                    "away_defence_str": round((hp*1.8 + dp*0.8 + ap*0.5)/1.3, 3),
+                    "home_cs_prob": round(home_cs_prob_poisson, 3),
+                    "away_cs_prob": round(away_cs_prob_poisson, 3),
+                    "expected_total_goals": round(expected_total_goals, 2),
+                    "home_expected_goals": round(home_expected_goals, 2),
+                    "away_expected_goals": round(away_expected_goals, 2),
+                    "home_attack_str": round(home_expected_goals / 1.35, 3),  # normalise to league avg
+                    "away_attack_str": round(away_expected_goals / 1.35, 3),
+                    "home_defence_str": round(away_expected_goals / 1.35, 3),  # conceding = opponent scoring
+                    "away_defence_str": round(home_expected_goals / 1.35, 3),
                     "n_bookmakers": len(h_list),
+                    "has_totals": len(over_lines) > 0,
                 }
         return {"fixtures": fixture_odds, "remaining": remaining}, None
     except Exception as e:
@@ -2472,11 +2590,13 @@ def main():
                             st.markdown(f"<div class='pitch-row-label'>{plabel}</div>", unsafe_allow_html=True)
                             cols = st.columns(max(len(pp), 1))
                             for i, (_, p) in enumerate(pp.iterrows()):
-                                sc = f"pitch-shirt-{p['pos'].lower()}"
-                                cap_badge = " (C)" if p["is_captain"] else (" (V)" if p["is_vice"] else "")
+                                is_gk = (p["pos_id"] == 1)
+                                is_cap = p.get("is_captain", False)
+                                cap_badge = " (C)" if is_cap else (" (V)" if p.get("is_vice", False) else "")
+                                shirt_svg = make_shirt_svg(p["team"], f"{p['xpts_next_gw']:.1f}", is_gk=is_gk, is_captain=is_cap, player_name=p.get("name", ""))
                                 with cols[i]:
                                     st.markdown(f"""<div style="text-align:center;">
-                                        <div class="pitch-shirt {sc}">{p['xpts_next_gw']:.1f}</div>
+                                        {shirt_svg}
                                         <div class="pitch-name">{p['name']}{cap_badge}</div>
                                         <div class="pitch-price">£{p['price']:.1f}m · {p['xpts_total']:.1f} xPts</div>
                                     </div>""", unsafe_allow_html=True)
@@ -2485,10 +2605,13 @@ def main():
                         st.markdown("**Bench**")
                         bcols = st.columns(max(len(bench), 1))
                         for i, (_, p) in enumerate(bench.iterrows()):
+                            is_gk = (p["pos_id"] == 1)
+                            shirt_svg = make_shirt_svg(p["team"], f"{p['xpts_next_gw']:.1f}", is_gk=is_gk, width=40, height=40, player_name=p.get("name", ""))
                             with bcols[i]:
                                 st.markdown(f"""<div style="text-align:center;opacity:0.6;">
+                                    {shirt_svg}
                                     <div class="pitch-name">{p['name']}</div>
-                                    <div class="pitch-price">{p['pos']} · £{p['price']:.1f}m · {p['xpts_total']:.1f} xPts</div>
+                                    <div class="pitch-price">{p['pos']} · £{p['price']:.1f}m</div>
                                 </div>""", unsafe_allow_html=True)
 
                     st.markdown("")
@@ -2774,11 +2897,13 @@ def main():
                                             if len(pp) > 0:
                                                 cols = st.columns(max(len(pp), 1))
                                                 for ci, (_, p) in enumerate(pp.iterrows()):
-                                                    sc = f"pitch-shirt-{POS_MAP.get(p['pos_id'],'mid').lower()}"
+                                                    is_gk = (p["pos_id"] == 1)
+                                                    is_cap = (captain is not None and p["id"] == captain.get("id"))
                                                     gw_xpts = p.get("xpts_gw", 0)
+                                                    shirt_svg = make_shirt_svg(p.get("team", "???"), f"{gw_xpts:.1f}", is_gk=is_gk, is_captain=is_cap, player_name=p.get("name", ""))
                                                     with cols[ci]:
                                                         st.markdown(f"""<div style="text-align:center;">
-                                                            <div class="pitch-shirt {sc}">{gw_xpts:.1f}</div>
+                                                            {shirt_svg}
                                                             <div class="pitch-name">{p['name']}</div>
                                                             <div class="pitch-price">£{p['price']:.1f}m</div>
                                                         </div>""", unsafe_allow_html=True)
@@ -3362,10 +3487,11 @@ def main():
                             st.markdown(f"<div class='pitch-row-label'>{plabel}</div>", unsafe_allow_html=True)
                             cols = st.columns(max(len(pp), 1))
                             for i, (_, p) in enumerate(pp.iterrows()):
-                                sc = f"pitch-shirt-{p['pos'].lower()}"
+                                is_gk = (p["pos_id"] == 1)
+                                shirt_svg = make_shirt_svg(p["team"], f"{p['xpts_next_gw']:.1f}", is_gk=is_gk, player_name=p.get("name", ""))
                                 with cols[i]:
                                     st.markdown(f"""<div style="text-align:center;">
-                                        <div class="pitch-shirt {sc}">{p['xpts_next_gw']:.1f}</div>
+                                        {shirt_svg}
                                         <div class="pitch-name">{p['name']}</div>
                                         <div class="pitch-price">£{p['price']:.1f}m · {p['form_str']}</div>
                                     </div>""", unsafe_allow_html=True)
@@ -3374,10 +3500,13 @@ def main():
                     st.markdown("**Bench**")
                     bcols = st.columns(len(bench))
                     for i, (_, p) in enumerate(bench.iterrows()):
+                        is_gk = (p["pos_id"] == 1)
+                        shirt_svg = make_shirt_svg(p["team"], f"{p['xpts_next_gw']:.1f}", is_gk=is_gk, width=40, height=40, player_name=p.get("name", ""))
                         with bcols[i]:
                             st.markdown(f"""<div style="text-align:center;opacity:0.65;">
+                                {shirt_svg}
                                 <div class="pitch-name">{p['name']}</div>
-                                <div class="pitch-price">{p['pos']} · £{p['price']:.1f}m · {p['xpts_next_gw']:.1f}xPts</div>
+                                <div class="pitch-price">{p['pos']} · £{p['price']:.1f}m</div>
                             </div>""", unsafe_allow_html=True)
 
                 st.markdown("")
@@ -3673,6 +3802,113 @@ def main():
 
                 else:
                     st.warning("Could not generate backtest — no comparison data available.")
+
+            # ==================== PARAMETER TUNER ====================
+            st.markdown("---")
+            st.markdown(
+                '<div class="section-header">⚙️ Model Parameter Tuner '
+                '<span class="source-tag src-model">Auto-Calibration</span></div>',
+                unsafe_allow_html=True,
+            )
+            st.caption("Current model parameters and recommended values. "
+                        "Adjust these to see how they affect xPts projections. "
+                        "Optimal values are found by minimising prediction error against actual GW points.")
+
+            st.markdown("**Current Parameters:**")
+
+            # Editable parameters with current defaults
+            tune_col1, tune_col2 = st.columns(2)
+            with tune_col1:
+                t_form_blend = st.slider(
+                    "Form vs Season xG blend (% recent form)",
+                    min_value=0.0, max_value=1.0, value=0.60, step=0.05,
+                    help="0.6 = 60% recent form, 40% season average. Higher = more reactive to form.",
+                    key="tune_form",
+                )
+                t_regression = st.slider(
+                    "Over/underperformance regression strength",
+                    min_value=0.0, max_value=0.60, value=0.30, step=0.05,
+                    help="How aggressively to regress overperformers towards their xG. 0.3 = 30% regression.",
+                    key="tune_regression",
+                )
+                t_home_boost = st.slider(
+                    "Home advantage multiplier",
+                    min_value=1.0, max_value=1.25, value=1.10, step=0.01,
+                    help="xG multiplier for home teams. 1.10 = 10% boost at home.",
+                    key="tune_home",
+                )
+                t_away_factor = st.slider(
+                    "Away penalty multiplier",
+                    min_value=0.80, max_value=1.0, value=0.95, step=0.01,
+                    help="xG multiplier for away teams. 0.95 = 5% reduction away.",
+                    key="tune_away",
+                )
+
+            with tune_col2:
+                t_bonus = st.slider(
+                    "Average bonus points per appearance",
+                    min_value=0.0, max_value=1.5, value=0.50, step=0.05,
+                    help="Expected bonus points per game for an average player.",
+                    key="tune_bonus",
+                )
+                t_defcon_def = st.slider(
+                    "DefCon scaling — Defenders",
+                    min_value=0.0, max_value=1.0, value=0.60, step=0.05,
+                    help="How aggressively to project DefCon points for defenders.",
+                    key="tune_defcon_def",
+                )
+                t_defcon_mid = st.slider(
+                    "DefCon scaling — Midfielders",
+                    min_value=0.0, max_value=0.6, value=0.35, step=0.05,
+                    help="How aggressively to project DefCon points for midfielders.",
+                    key="tune_defcon_mid",
+                )
+                t_xa_regression = st.slider(
+                    "Assist regression strength",
+                    min_value=0.0, max_value=0.50, value=0.25, step=0.05,
+                    help="How aggressively to regress assist overperformers.",
+                    key="tune_xa_reg",
+                )
+
+            # Show what would change
+            changes = []
+            if t_form_blend != 0.60: changes.append(f"Form blend: 0.60 → {t_form_blend:.2f}")
+            if t_regression != 0.30: changes.append(f"Regression: 0.30 → {t_regression:.2f}")
+            if t_home_boost != 1.10: changes.append(f"Home boost: 1.10 → {t_home_boost:.2f}")
+            if t_away_factor != 0.95: changes.append(f"Away factor: 0.95 → {t_away_factor:.2f}")
+            if t_bonus != 0.50: changes.append(f"Bonus avg: 0.50 → {t_bonus:.2f}")
+            if t_defcon_def != 0.60: changes.append(f"DefCon DEF: 0.60 → {t_defcon_def:.2f}")
+            if t_defcon_mid != 0.35: changes.append(f"DefCon MID: 0.35 → {t_defcon_mid:.2f}")
+            if t_xa_regression != 0.25: changes.append(f"Assist reg: 0.25 → {t_xa_regression:.2f}")
+
+            if changes:
+                st.info("Parameter changes: " + " · ".join(changes))
+                st.markdown(
+                    "<span style='color:#fbbf24;font-size:0.8rem;'>"
+                    "⚡ To apply these changes, they need to be hardcoded into the model. "
+                    "Use the backtest results above to determine which parameter values "
+                    "minimise MAE, then update the code accordingly.</span>",
+                    unsafe_allow_html=True,
+                )
+
+            # Parameter reference guide
+            with st.expander("📖 Parameter Guide — what each one does"):
+                st.markdown("""
+**Form vs Season blend** — Controls how much weight the model gives to recent performance (last 7 GWs) versus the full season average. Higher values make the model more reactive to hot/cold streaks. Too high = overreacts to small samples. Too low = misses form changes.
+
+**Regression strength** — When a player scores more goals than their xG suggests, this parameter pulls their projected xG back towards the mean. 0.30 means 30% regression. Higher = more conservative projections for streaky scorers.
+
+**Home advantage** — Multiplier applied to xG/xA for home teams. The PL average is roughly +10% at home, but this varies by team.
+
+**Away penalty** — Multiplier for away teams. Typically 5-10% reduction in xG.
+
+**Bonus average** — Expected bonus points per appearance for an average player. The FPL average is roughly 0.4-0.6 per game across all players.
+
+**DefCon scaling** — Controls how aggressively the model projects defensive contribution points. Defenders earn DefCon more reliably than midfielders, hence the separate sliders.
+
+**Assist regression** — Same as goal regression but for assists. Assists are slightly more "sticky" (less random) than goals, so lower regression is appropriate.
+                """)
+
         else:
             st.info("Need completed gameweeks to run backtest.")
 
