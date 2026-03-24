@@ -3178,7 +3178,7 @@ def main():
 
             # Get fixture info for next GW
             cap_candidates["next_fixture"] = cap_candidates["upcoming"].apply(
-                lambda u: f"{'(H)' if u[0]['home'] else '(A)'} vs {teams.get(u[0]['opp_id'], {}).get('short_name', '?')}" if u else "?"
+                lambda u: f"{'(H)' if u[0]['home'] else '(A)'} vs {teams.get(u[0]['opp'], {}).get('short_name', '?')}" if u else "?"
             )
             cap_candidates["fixture_diff"] = cap_candidates["upcoming"].apply(
                 lambda u: u[0].get("difficulty", 3) if u else 3
@@ -3298,7 +3298,7 @@ def main():
                 row = {"Player": p["name"], "Team": p["team"], "Pos": p["pos"],
                        "Price": f"£{p['price']:.1f}m", "xPts 6GW": round(p["xpts_total"], 1)}
                 for i, fix in enumerate(p["upcoming"][:6]):
-                    opp = teams.get(fix["opp_id"], {}).get("short_name", "?")
+                    opp = teams.get(fix["opp"], {}).get("short_name", "?")
                     venue = "H" if fix["home"] else "A"
                     diff = fix.get("difficulty", 3)
                     row[f"GW{planning_gw_id + i}"] = f"{opp}({venue})"
