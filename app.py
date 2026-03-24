@@ -261,6 +261,7 @@ def load_recent_gw_live_data(current_gw_id, n_recent=7):
     Fetch per-GW live stats for the last N completed gameweeks.
     Uses event/{gw}/live/ endpoint — one call per GW, returns all players.
     Returns: dict {player_id: [{gw, minutes, xG, xA, xGC, goals, assists, ...}, ...]}
+    Now also tracks 0-minute GWs for rotation analysis.
     """
     headers = {"User-Agent": "FPL-Optimizer/2.0"}
     player_gw_data = {}
@@ -279,13 +280,15 @@ def load_recent_gw_live_data(current_gw_id, n_recent=7):
             for el in elements:
                 pid = el["id"]
                 stats = el.get("stats", {})
-                if stats.get("minutes", 0) == 0:
-                    continue
+                minutes = stats.get("minutes", 0)
+
                 if pid not in player_gw_data:
                     player_gw_data[pid] = []
                 player_gw_data[pid].append({
                     "gw": gw,
-                    "minutes": stats.get("minutes", 0),
+                    "minutes": minutes,
+                    "started": 1 if minutes >= 60 else 0,
+                    "appeared": 1 if minutes > 0 else 0,
                     "goals": stats.get("goals_scored", 0),
                     "assists": stats.get("assists", 0),
                     "xG": float(stats.get("expected_goals", 0) or 0),
@@ -300,6 +303,94 @@ def load_recent_gw_live_data(current_gw_id, n_recent=7):
             continue
 
     return player_gw_data
+
+
+def compute_rotation_risk(player_gw_data, current_gw_id, n_recent=7):
+    """
+    Analyse recent start patterns to predict rotation risk.
+
+    Returns: dict {player_id: {
+        start_rate: 0-1 (% of recent GWs started),
+        appear_rate: 0-1 (% of recent GWs appeared),
+        avg_recent_mins: float,
+        rotation_risk: 'low'|'medium'|'high',
+        consistency: float (0-1, how consistent their minutes are),
+        projected_start_prob: float (probability of starting next GW),
+    }}
+
+    Key patterns detected:
+    - Nailed starters (start 90%+ of games) → low risk
+    - Rotation players (start 50-80%) → medium risk (Pep roulette, etc.)
+    - Bench warmers / fringe (start <50%) → high risk
+    - Injury returnees (recent 0-min GWs followed by starts) → medium risk
+    """
+    rotation_data = {}
+
+    for pid, gw_list in player_gw_data.items():
+        # Only use recent N GWs
+        recent = sorted(gw_list, key=lambda x: x["gw"], reverse=True)[:n_recent]
+
+        if len(recent) < 3:
+            continue
+
+        n_gws = len(recent)
+        n_started = sum(1 for g in recent if g["started"])
+        n_appeared = sum(1 for g in recent if g["appeared"])
+        mins_list = [g["minutes"] for g in recent]
+        avg_mins = np.mean(mins_list)
+
+        start_rate = n_started / n_gws
+        appear_rate = n_appeared / n_gws
+
+        # Consistency: how stable are their minutes? (low std = consistent)
+        mins_std = np.std(mins_list)
+        # Normalise: 0 std = perfectly consistent (1.0), high std = inconsistent (0.0)
+        consistency = max(0, 1.0 - (mins_std / 45.0))  # 45 mins std = 0 consistency
+
+        # Detect recent trend: are they being phased in/out?
+        if len(recent) >= 4:
+            recent_half = recent[:len(recent)//2]
+            older_half = recent[len(recent)//2:]
+            recent_start_rate = sum(1 for g in recent_half if g["started"]) / len(recent_half)
+            older_start_rate = sum(1 for g in older_half if g["started"]) / len(older_half)
+            trend = recent_start_rate - older_start_rate  # positive = trending up
+        else:
+            trend = 0
+
+        # Projected start probability
+        # Weight recent starts more heavily (exponential decay)
+        weighted_starts = 0
+        weight_sum = 0
+        for i, g in enumerate(recent):
+            w = 0.85 ** i  # most recent = 1.0, then 0.85, 0.72...
+            weighted_starts += g["started"] * w
+            weight_sum += w
+
+        weighted_start_rate = weighted_starts / weight_sum if weight_sum > 0 else start_rate
+
+        # Blend weighted rate with overall rate
+        projected_start_prob = weighted_start_rate * 0.7 + start_rate * 0.3
+
+        # Classify risk
+        if projected_start_prob >= 0.85:
+            risk = "low"
+        elif projected_start_prob >= 0.55:
+            risk = "medium"
+        else:
+            risk = "high"
+
+        rotation_data[pid] = {
+            "start_rate": round(start_rate, 2),
+            "appear_rate": round(appear_rate, 2),
+            "avg_recent_mins": round(avg_mins, 1),
+            "consistency": round(consistency, 2),
+            "trend": round(trend, 2),
+            "rotation_risk": risk,
+            "projected_start_prob": round(projected_start_prob, 2),
+            "n_recent_gws": n_gws,
+        }
+
+    return rotation_data
 
 
 def compute_form_weighted_xg(player_gw_data, n_recent=7):
@@ -476,7 +567,7 @@ TEAM_NAME_MAP = {
 
 def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
                      form_xg_data=None, team_fixture_counts=None, elo_ratings=None,
-                     live_odds=None):
+                     live_odds=None, rotation_data=None):
     """
     Source 3: Custom expected points model.
 
@@ -540,35 +631,48 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
         total_gws_played = max(current_gw_id - 1, 1)  # GWs elapsed so far
 
         # ============================================================
-        # EXPECTED MINUTES MODEL
+        # EXPECTED MINUTES MODEL (with rotation prediction)
         # ============================================================
-        # Key insight: a player's expected minutes next GW should be based on
-        # their actual average minutes per GW this season, not just a binary
-        # "available or not". This prevents fringe/youth players being inflated.
+        # Uses three signals:
+        # 1. Season average minutes (baseline)
+        # 2. FPL's chance_of_playing (injury/availability)
+        # 3. Rotation risk from recent start patterns (Pep roulette etc.)
 
         # Average minutes per GW this season
         avg_mins_per_gw = mins / total_gws_played
+
+        # Get rotation data if available
+        rot = (rotation_data or {}).get(pid)
 
         # FPL's chance_of_playing (None = no news = likely available)
         chance = p.get("chance_playing", None)
         if chance is not None and not pd.isna(chance):
             availability = float(chance) / 100.0
+        elif rot:
+            # Use rotation model — projected start probability from recent pattern
+            # This is the key improvement: a player who starts 60% of games
+            # (e.g. Pep roulette victim) gets 0.60 availability, not 0.95
+            availability = rot["projected_start_prob"]
         else:
-            # No news — availability based on recent playing pattern
+            # Fallback: basic pattern from season average
             if avg_mins_per_gw >= 60:
-                availability = 0.95  # regular starter
+                availability = 0.95
             elif avg_mins_per_gw >= 30:
-                availability = 0.75  # rotation / sub risk
+                availability = 0.75
             elif avg_mins_per_gw >= 10:
-                availability = 0.40  # mainly a sub
+                availability = 0.40
             elif mins > 0:
-                availability = 0.15  # fringe player
+                availability = 0.15
             else:
-                availability = 0.0   # hasn't played
+                availability = 0.0
 
-        # Expected minutes next GW (capped at 90)
-        # Blend: recent avg mins * availability
-        expected_mins = min(avg_mins_per_gw * availability, 90)
+        # Expected minutes: use rotation-aware average if available
+        if rot and rot["avg_recent_mins"] > 0:
+            # Blend recent average with season average (recent is more predictive)
+            recent_avg = rot["avg_recent_mins"]
+            expected_mins = min((recent_avg * 0.7 + avg_mins_per_gw * 0.3) * availability, 90)
+        else:
+            expected_mins = min(avg_mins_per_gw * availability, 90)
 
         # Convert to "expected 90s" for scaling xG/xA
         expected_90s = expected_mins / 90.0
@@ -1230,6 +1334,9 @@ def enrich_data(bootstrap, fixtures, team_odds):
     player_gw_data = load_recent_gw_live_data(gw_id, n_recent=7)
     form_xg_data = compute_form_weighted_xg(player_gw_data, n_recent=7)
 
+    # Compute rotation risk from recent start patterns
+    rotation_data = compute_rotation_risk(player_gw_data, gw_id, n_recent=7)
+
     # Detect blank/double gameweeks
     team_fixture_counts = detect_blank_double_gws(fixtures, gw_id, n_gws=6, teams=teams)
 
@@ -1244,7 +1351,8 @@ def enrich_data(bootstrap, fixtures, team_odds):
                                  form_xg_data=form_xg_data,
                                  team_fixture_counts=team_fixture_counts,
                                  elo_ratings=elo_ratings,
-                                 live_odds=live_odds_data)
+                                 live_odds=live_odds_data,
+                                 rotation_data=rotation_data)
 
     # Add xPts columns
     # xpts_next_gw = xPts for the specific next gameweek (planning_gw_id)
@@ -1264,6 +1372,14 @@ def enrich_data(bootstrap, fixtures, team_odds):
     # Value metric
     df["value"] = df.apply(
         lambda r: round(r["xpts_total"] / max(r["price"], 1), 2), axis=1
+    )
+
+    # Add rotation risk data
+    df["rotation_risk"] = df["id"].map(
+        lambda pid: rotation_data.get(pid, {}).get("rotation_risk", "unknown")
+    )
+    df["start_prob"] = df["id"].map(
+        lambda pid: rotation_data.get(pid, {}).get("projected_start_prob", 0)
     )
 
     return df, teams, current_gw, planning_gw_id, upcoming, fixtures, xpts_map, team_fixture_counts, xpts_breakdown
@@ -2919,6 +3035,156 @@ def main():
             dd.index += 1
             st.dataframe(dd, use_container_width=True, height=380)
 
+        # ==================== CAPTAIN OPTIMISER ====================
+        st.markdown("")
+        st.markdown(
+            '<div class="section-header">👑 Captain Optimiser '
+            '<span class="source-tag src-model">Next GW</span></div>',
+            unsafe_allow_html=True,
+        )
+        st.caption("Ranks captain candidates by expected captaincy points (xPts × 2). "
+                    "Shows ownership for differential edge — captaining a low-ownership player "
+                    "who hauls gives you a bigger rank boost than a highly-owned pick.")
+
+        if len(qualified) > 0:
+            cap_candidates = qualified[qualified["xpts_next_gw"] > 0].copy()
+            cap_candidates["cap_xpts"] = cap_candidates["xpts_next_gw"] * 2
+            cap_candidates["differential_score"] = cap_candidates["cap_xpts"] * (1 + (100 - cap_candidates["selected_pct"]) / 100)
+
+            # Get fixture info for next GW
+            cap_candidates["next_fixture"] = cap_candidates["upcoming"].apply(
+                lambda u: f"{'(H)' if u[0]['home'] else '(A)'} vs {teams.get(u[0]['opp_id'], {}).get('short_name', '?')}" if u else "?"
+            )
+            cap_candidates["fixture_diff"] = cap_candidates["upcoming"].apply(
+                lambda u: u[0].get("difficulty", 3) if u else 3
+            )
+
+            cap_top = cap_candidates.nlargest(15, "cap_xpts")
+
+            cap_display = cap_top[[
+                "name", "team", "pos", "price", "next_fixture", "fixture_diff",
+                "xpts_next_gw", "cap_xpts", "selected_pct", "rotation_risk", "start_prob"
+            ]].copy()
+            cap_display.columns = [
+                "Player", "Team", "Pos", "Price", "Fixture", "FDR",
+                "xPts", "Cap xPts", "Own%", "Rotation", "Start%"
+            ]
+            cap_display["Start%"] = (cap_display["Start%"] * 100).round(0).astype(int).astype(str) + "%"
+            cap_display = cap_display.reset_index(drop=True)
+            cap_display.index += 1
+            st.dataframe(cap_display, use_container_width=True, height=540)
+
+            # Highlight top pick
+            if len(cap_top) > 0:
+                best_cap = cap_top.iloc[0]
+                st.markdown(
+                    f"<div style='background:#1a1e2e;border-radius:8px;padding:0.8rem;margin:0.5rem 0;'>"
+                    f"<span style='color:#fbbf24;font-weight:700;font-size:1.1rem;'>👑 Recommended Captain: "
+                    f"{best_cap['name']}</span><br>"
+                    f"<span style='color:#8892a8;font-size:0.8rem;'>"
+                    f"{best_cap['team']} · {best_cap['next_fixture']} · "
+                    f"{best_cap['xpts_next_gw']:.1f} xPts × 2 = {best_cap['cap_xpts']:.1f} · "
+                    f"Owned by {best_cap['selected_pct']:.1f}% · "
+                    f"Rotation: {best_cap['rotation_risk']} ({best_cap['start_prob']:.0%})</span></div>",
+                    unsafe_allow_html=True,
+                )
+
+                # Differential captain suggestion
+                diff_caps = cap_candidates[cap_candidates["selected_pct"] < 15].nlargest(3, "cap_xpts")
+                if len(diff_caps) > 0:
+                    diff_best = diff_caps.iloc[0]
+                    st.markdown(
+                        f"<div style='background:#1a2e1a;border-radius:8px;padding:0.8rem;margin:0.5rem 0;'>"
+                        f"<span style='color:#34d399;font-weight:700;'>🎯 Differential Captain: "
+                        f"{diff_best['name']}</span><br>"
+                        f"<span style='color:#8892a8;font-size:0.8rem;'>"
+                        f"{diff_best['team']} · {diff_best['next_fixture']} · "
+                        f"{diff_best['xpts_next_gw']:.1f} xPts × 2 = {diff_best['cap_xpts']:.1f} · "
+                        f"Only {diff_best['selected_pct']:.1f}% ownership — huge upside if they haul</span></div>",
+                        unsafe_allow_html=True,
+                    )
+
+        # ==================== OWNERSHIP ANALYSIS ====================
+        st.markdown("")
+        st.markdown(
+            '<div class="section-header">📊 Ownership Analysis '
+            '<span class="source-tag src-fpl">Effective Ownership</span></div>',
+            unsafe_allow_html=True,
+        )
+        st.caption("High ownership + high xPts = safe pick (everyone has them). "
+                    "Low ownership + high xPts = differential (big rank gains if they score). "
+                    "High ownership + low xPts = trap (everyone has them but they won't score).")
+
+        if len(qualified) > 0:
+            own_df = qualified[qualified["xpts_next_gw"] > 0].copy()
+
+            # Template players
+            col_safe, col_diff, col_trap = st.columns(3)
+
+            with col_safe:
+                st.markdown("**🛡️ Must-Haves** (high own%, high xPts)")
+                must_haves = own_df[(own_df["selected_pct"] >= 20) & (own_df["xpts_next_gw"] > 0)].nlargest(8, "xpts_next_gw")
+                for _, p in must_haves.iterrows():
+                    st.markdown(
+                        f"<span style='color:#8892a8;font-size:0.78rem;'>"
+                        f"**{p['name']}** ({p['team']}) · {p['xpts_next_gw']:.1f} xPts · "
+                        f"{p['selected_pct']:.0f}% owned</span>",
+                        unsafe_allow_html=True,
+                    )
+
+            with col_diff:
+                st.markdown("**🎯 Differentials** (low own%, high xPts)")
+                differentials = own_df[(own_df["selected_pct"] < 15)].nlargest(8, "xpts_next_gw")
+                for _, p in differentials.iterrows():
+                    st.markdown(
+                        f"<span style='color:#34d399;font-size:0.78rem;'>"
+                        f"**{p['name']}** ({p['team']}) · {p['xpts_next_gw']:.1f} xPts · "
+                        f"Only {p['selected_pct']:.1f}% owned</span>",
+                        unsafe_allow_html=True,
+                    )
+
+            with col_trap:
+                st.markdown("**⚠️ Traps** (high own%, low xPts next GW)")
+                traps = own_df[own_df["selected_pct"] >= 15].nsmallest(8, "xpts_next_gw")
+                for _, p in traps.iterrows():
+                    st.markdown(
+                        f"<span style='color:#f87171;font-size:0.78rem;'>"
+                        f"**{p['name']}** ({p['team']}) · {p['xpts_next_gw']:.1f} xPts · "
+                        f"{p['selected_pct']:.0f}% owned</span>",
+                        unsafe_allow_html=True,
+                    )
+
+        # ==================== FIXTURE TICKER ====================
+        st.markdown("")
+        st.markdown(
+            '<div class="section-header">📅 Fixture Sequence Ticker '
+            '<span class="source-tag src-fpl">Next 6 GWs</span></div>',
+            unsafe_allow_html=True,
+        )
+        st.caption("Green = easy fixture (FDR 1-2), amber = medium (3), red = hard (4-5). "
+                    "Target players with runs of green fixtures.")
+
+        if len(qualified) > 0:
+            # Show top 30 players by xPts with their fixture sequence
+            ticker_players = qualified.nlargest(30, "xpts_total")
+
+            ticker_rows = []
+            for _, p in ticker_players.iterrows():
+                row = {"Player": p["name"], "Team": p["team"], "Pos": p["pos"],
+                       "Price": f"£{p['price']:.1f}m", "xPts 6GW": round(p["xpts_total"], 1)}
+                for i, fix in enumerate(p["upcoming"][:6]):
+                    opp = teams.get(fix["opp_id"], {}).get("short_name", "?")
+                    venue = "H" if fix["home"] else "A"
+                    diff = fix.get("difficulty", 3)
+                    row[f"GW{planning_gw_id + i}"] = f"{opp}({venue})"
+                ticker_rows.append(row)
+
+            if ticker_rows:
+                ticker_df = pd.DataFrame(ticker_rows)
+                ticker_df = ticker_df.reset_index(drop=True)
+                ticker_df.index += 1
+                st.dataframe(ticker_df, use_container_width=True, height=700)
+
     # ==================== PLAYER PROJECTIONS ====================
     with tab3:
         fc1, fc2, fc3, fc4, fc5 = st.columns([2, 1, 1, 1, 1])
@@ -2984,7 +3250,8 @@ def main():
                     f"{player_row['name']} · {player_row['team']} · {player_row['pos']} · "
                     f"£{player_row['price']:.1f}m · {player_row['minutes']} mins · "
                     f"xG/90: {player_row['xg_per90']:.3f} · xA/90: {player_row['xa_per90']:.3f} · "
-                    f"DefCon/90: {player_row.get('defcon_per90', 0):.2f}"
+                    f"DefCon/90: {player_row.get('defcon_per90', 0):.2f} · "
+                    f"Rotation: {player_row.get('rotation_risk', '?')} ({player_row.get('start_prob', 0):.0%})"
                     f"</span>",
                     unsafe_allow_html=True,
                 )
