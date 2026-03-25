@@ -2235,6 +2235,14 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
             gw_entry["xi"] = xi
             gw_entry["bench"] = bench
             gw_entry["captain"] = find_best_captain(xi, xpts_map, gw) if xi is not None else None
+            # Calculate total xPts
+            fh_total = 0
+            if xi is not None and len(xi) > 0:
+                fh_total = xi["id"].map(lambda pid: xpts_map.get(pid, {}).get(gw, 0)).sum()
+                cap = gw_entry.get("captain")
+                if cap is not None:
+                    fh_total += xpts_map.get(cap.get("id", 0) if isinstance(cap, dict) else getattr(cap, "id", 0), {}).get(gw, 0)
+            gw_entry["total_xpts"] = round(fh_total, 1)
             current_ft = min(current_ft + 1, 5)
             plan.append(gw_entry)
             continue
@@ -2262,6 +2270,14 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
             gw_entry["xi"] = xi
             gw_entry["bench"] = bench
             gw_entry["captain"] = find_best_captain(xi, xpts_map, gw) if xi is not None else None
+            # Calculate total xPts
+            wc_total = 0
+            if xi is not None and len(xi) > 0:
+                wc_total = xi["id"].map(lambda pid: xpts_map.get(pid, {}).get(gw, 0)).sum()
+                cap = gw_entry.get("captain")
+                if cap is not None:
+                    wc_total += xpts_map.get(cap.get("id", 0) if isinstance(cap, dict) else getattr(cap, "id", 0), {}).get(gw, 0)
+            gw_entry["total_xpts"] = round(wc_total, 1)
             plan.append(gw_entry)
             continue
 
@@ -2401,6 +2417,25 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
             gw_entry["captain_multiplier"] = 3
         if chip == "bench_boost":
             gw_entry["bench_boost"] = True
+
+        # Calculate total xPts for this GW (used by chip strategy optimiser)
+        gw_total = 0
+        if xi is not None and len(xi) > 0:
+            xi_xpts = xi["id"].map(lambda pid: xpts_map.get(pid, {}).get(gw, 0))
+            gw_total = xi_xpts.sum()
+            # Captain bonus
+            cap = gw_entry.get("captain")
+            cap_mult = gw_entry.get("captain_multiplier", 2)
+            if cap is not None:
+                cap_pts = xpts_map.get(cap.get("id", 0) if isinstance(cap, dict) else cap.get("id", 0), {}).get(gw, 0)
+                gw_total += cap_pts * (cap_mult - 1)
+            # Bench boost
+            if gw_entry.get("bench_boost") and bench is not None and len(bench) > 0:
+                bench_xpts = bench["id"].map(lambda pid: xpts_map.get(pid, {}).get(gw, 0))
+                gw_total += bench_xpts.sum()
+        # Subtract hits
+        gw_total -= gw_entry.get("hit", 0)
+        gw_entry["total_xpts"] = round(gw_total, 1)
 
         plan.append(gw_entry)
 
@@ -2584,6 +2619,7 @@ def main():
                 # === CHIP STRATEGY RECOMMENDER ===
                 chips_rem = team_data.get("chips_remaining", {})
                 has_any_chips = any(v > 0 for v in chips_rem.values())
+                ft_available = team_data.get("free_transfers", 1)
 
                 if has_any_chips:
                     st.markdown("")
@@ -2610,6 +2646,7 @@ def main():
                         chip_recs = []
                         from collections import Counter
 
+                        # Pre-compute per-GW data for chip scoring
                         for gw_event in future_gws[:12]:
                             gw_id_c = gw_event["id"]
                             gw_fixtures = [f for f in fixtures_list if f.get("event") == gw_id_c]
@@ -2625,103 +2662,202 @@ def main():
                             dgw_teams = sum(1 for t, c in team_fix_count.items() if c >= 2)
                             blank_teams = 20 - len(teams_with_fixtures)
 
-                            top_cap_xpts = 0
+                            # Get all player xPts for this GW
+                            all_gw_xpts = []
                             for _, p in qualified.iterrows():
                                 gw_xpts = xpts_map.get(p["id"], {}).get(gw_id_c, 0)
-                                if gw_xpts > top_cap_xpts:
-                                    top_cap_xpts = gw_xpts
+                                if gw_xpts > 0:
+                                    all_gw_xpts.append({
+                                        "id": p["id"], "xpts": gw_xpts, "pos_id": p["pos_id"],
+                                        "team_id": p["team_id"], "price": p["now_cost"],
+                                        "name": p["name"],
+                                    })
+                            all_gw_xpts.sort(key=lambda x: x["xpts"], reverse=True)
 
-                            scores = {}
-                            scores["3xc"] = round(top_cap_xpts * (1.5 if dgw_teams > 0 else 1.0), 1)
-                            scores["bboost"] = round(n_matches * 0.5 + dgw_teams * 2.0, 1)
-                            scores["freehit"] = round(blank_teams * 3.0 + dgw_teams * 1.5, 1)
-                            wc_horizon = sum(
-                                xpts_map.get(p["id"], {}).get(g, 0)
-                                for _, p in qualified.nlargest(30, "xpts_total").iterrows()
+                            # Top captain xPts
+                            top_cap_xpts = all_gw_xpts[0]["xpts"] if all_gw_xpts else 0
+
+                            # === SCORE EACH CHIP AS ACTUAL xPTS GAINED ===
+
+                            # TRIPLE CAPTAIN: extra points = top_captain_xPts * 1 (the extra double)
+                            # Normal captain = 2x, TC = 3x, so gain = 1x the captain's xPts
+                            tc_gain = top_cap_xpts
+
+                            # BENCH BOOST: extra points = sum of bench xPts
+                            # Estimate bench xPts: after picking best XI (11 players), sum the next 4
+                            # Simple approximation: sort all by xPts, top 11 = XI, next 4 = bench
+                            if len(all_gw_xpts) >= 15:
+                                bench_xpts = sum(p["xpts"] for p in all_gw_xpts[11:15])
+                            else:
+                                bench_xpts = 0
+                            bb_gain = bench_xpts
+
+                            # FREE HIT: extra points = best possible 15 xPts - current squad xPts
+                            # Approximate: best possible XI from entire pool vs user's current squad
+                            my_squad_gw_xpts = sum(
+                                xpts_map.get(pid, {}).get(gw_id_c, 0)
+                                for pid in team_data.get("squad_ids", [])
+                            )
+                            # Best possible squad: top 15 respecting position constraints (rough)
+                            best_possible_xpts = sum(p["xpts"] for p in all_gw_xpts[:15]) if len(all_gw_xpts) >= 15 else 0
+                            fh_gain = max(best_possible_xpts - my_squad_gw_xpts, 0)
+
+                            # WILDCARD: extra points = improved squad xPts over next 4 GWs
+                            # Compare current squad's 4-GW total vs best possible 4-GW total
+                            my_4gw = sum(
+                                xpts_map.get(pid, {}).get(g, 0)
+                                for pid in team_data.get("squad_ids", [])
                                 for g in range(gw_id_c, min(gw_id_c + 4, 39))
                             )
-                            scores["wildcard"] = round(wc_horizon / 100, 1)
+                            # Best possible 4-GW (rough: top 15 players by total over 4 GWs)
+                            player_4gw = []
+                            for _, p in qualified.iterrows():
+                                total_4 = sum(xpts_map.get(p["id"], {}).get(g, 0) for g in range(gw_id_c, min(gw_id_c + 4, 39)))
+                                player_4gw.append(total_4)
+                            player_4gw.sort(reverse=True)
+                            best_4gw = sum(player_4gw[:15]) if len(player_4gw) >= 15 else 0
+                            wc_gain = max(best_4gw - my_4gw, 0)
+
+                            scores = {
+                                "3xc": round(tc_gain, 1),
+                                "bboost": round(bb_gain, 1),
+                                "freehit": round(fh_gain, 1),
+                                "wildcard": round(wc_gain, 1),
+                            }
 
                             chip_recs.append({
                                 "gw": gw_id_c, "n_matches": n_matches,
                                 "dgw_teams": dgw_teams, "blank_teams": blank_teams,
                                 "top_cap": round(top_cap_xpts, 1), "scores": scores,
+                                "bench_xpts": round(bench_xpts, 1),
+                                "fh_gain": round(fh_gain, 1),
                             })
 
                         # === OPTIMAL CHIP ALLOCATION ===
-                        # Try all valid combinations of chip→GW assignments where:
-                        # 1. No two chips share the same GW
-                        # 2. Each chip is assigned to the GW that maximises total xPts impact
-                        #
-                        # We use a brute-force approach over the available chips
-                        # (max 4 chips × 12 GWs = very manageable)
+                        # Simulate the 6-GW plan with different chip combinations
+                        # and pick the one that produces the highest total xPts.
+                        # This is the only way to correctly measure chip value —
+                        # each chip's benefit depends on which OTHER chips are active.
                         available_chips = [k for k, v in chips_rem.items() if v > 0]
                         available_gws = [r["gw"] for r in chip_recs]
 
-                        # Build score lookup: chip_scores[chip_key][gw] = score
-                        chip_scores = {}
-                        for rec in chip_recs:
-                            for ck in available_chips:
-                                if ck not in chip_scores:
-                                    chip_scores[ck] = {}
-                                chip_scores[ck][rec["gw"]] = rec["scores"].get(ck, 0)
+                        # Map chip names from API format to planner format
+                        chip_name_map = {
+                            "wildcard": "wildcard", "freehit": "free_hit",
+                            "3xc": "triple_captain", "bboost": "bench_boost",
+                        }
 
-                        # Find the best assignment using recursive search
-                        best_assignment = {}
-                        best_total = 0
+                        # Generate all valid chip→GW combinations
+                        # With max 4 chips and ~8 remaining GWs this is very manageable
+                        from itertools import combinations, permutations
 
-                        def find_best(remaining_chips, used_gws, current_assignment, current_total):
-                            nonlocal best_assignment, best_total
-                            if not remaining_chips:
-                                if current_total > best_total:
-                                    best_total = current_total
-                                    best_assignment = current_assignment.copy()
-                                return
-                            chip = remaining_chips[0]
-                            rest = remaining_chips[1:]
-                            for gw in available_gws:
-                                if gw in used_gws:
+                        # Build list of (chip, gw) possibilities
+                        best_plan_total = -1
+                        best_chip_schedule = {}
+                        best_plan = None
+
+                        # First: evaluate with NO chips (baseline)
+                        try:
+                            baseline_plan = build_rolling_plan(
+                                my_squad, df,
+                                bank=team_data["bank"],
+                                free_transfers=ft_available,
+                                purchase_prices=team_data.get("purchase_prices", {}),
+                                selling_prices_api=team_data.get("selling_prices_api", {}),
+                                xpts_map=xpts_map,
+                                planning_gw_id=planning_gw_id,
+                                n_gws=6,
+                                chip_schedule={},
+                                team_fixture_counts=team_fixture_counts,
+                            )
+                            baseline_total = sum(g.get("total_xpts", 0) for g in baseline_plan) if baseline_plan else 0
+                        except Exception:
+                            baseline_total = 0
+                            baseline_plan = None
+
+                        # Generate all possible chip schedules
+                        # Each chip gets assigned to one GW, no two chips on same GW
+                        plan_gws = [planning_gw_id + i for i in range(6)]
+                        chip_combos = [{}]  # start with empty (no chips)
+
+                        if len(available_chips) > 0:
+                            # For each subset of chips (use all, or some)
+                            for n_chips in range(1, len(available_chips) + 1):
+                                for chip_subset in combinations(available_chips, n_chips):
+                                    # For each permutation of GW assignments
+                                    for gw_perm in permutations(plan_gws, n_chips):
+                                        schedule = {}
+                                        for c, g in zip(chip_subset, gw_perm):
+                                            schedule[g] = chip_name_map.get(c, c)
+                                        chip_combos.append(schedule)
+
+                        # Cap combos to prevent timeout (if too many, sample smartly)
+                        if len(chip_combos) > 200:
+                            # Keep empty + prioritise combos using all available chips
+                            full_chip_combos = [c for c in chip_combos if len(c) == len(available_chips)]
+                            partial_combos = [c for c in chip_combos if 0 < len(c) < len(available_chips)]
+                            import random
+                            random.shuffle(partial_combos)
+                            chip_combos = [{}] + full_chip_combos[:150] + partial_combos[:49]
+
+                        all_results = []
+                        with st.spinner(f"Evaluating {len(chip_combos)} chip strategies..."):
+                            for schedule in chip_combos:
+                                try:
+                                    plan = build_rolling_plan(
+                                        my_squad, df,
+                                        bank=team_data["bank"],
+                                        free_transfers=ft_available,
+                                        purchase_prices=team_data.get("purchase_prices", {}),
+                                        selling_prices_api=team_data.get("selling_prices_api", {}),
+                                        xpts_map=xpts_map,
+                                        planning_gw_id=planning_gw_id,
+                                        n_gws=6,
+                                        chip_schedule=schedule,
+                                        team_fixture_counts=team_fixture_counts,
+                                    )
+                                    if plan:
+                                        total = sum(g.get("total_xpts", 0) for g in plan)
+                                        all_results.append({"schedule": dict(schedule), "total": total})
+                                except Exception:
                                     continue
-                                score = chip_scores.get(chip, {}).get(gw, 0)
-                                current_assignment[chip] = gw
-                                find_best(rest, used_gws | {gw}, current_assignment, current_total + score)
-                            # Also try NOT assigning this chip (if no good GW)
-                            find_best(rest, used_gws, current_assignment, current_total)
 
-                        find_best(available_chips, set(), {}, 0)
+                        all_results.sort(key=lambda x: x["total"], reverse=True)
 
-                        # Map assignments back to full rec data
-                        assigned = {}
-                        for chip_key, gw in best_assignment.items():
-                            for rec in chip_recs:
-                                if rec["gw"] == gw:
-                                    assigned[chip_key] = rec
-                                    break
+                        st.markdown("**🧠 Optimal Chip Strategy:**")
+                        st.caption(f"Evaluated {len(chip_combos)} combinations over 6 GWs. "
+                                   f"Baseline (no chips): {baseline_total:.1f} xPts")
 
-                        st.markdown("**🧠 Recommended Chip Strategy:**")
-                        st.caption("Chips allocated to maximise total xPts impact — each on a different gameweek.")
+                        top_results = all_results[:3]
+                        reverse_map = {v: k for k, v in chip_name_map.items()}
 
-                        # Display in GW order
-                        for chip_key, rec in sorted(assigned.items(), key=lambda x: x[1]["gw"]):
-                            label = chip_labels.get(chip_key, chip_key)
-                            best = rec
-                            if chip_key == "3xc":
-                                reason = f"Top captain: {best['top_cap']} xPts"
-                                if best["dgw_teams"] > 0: reason += f" · {best['dgw_teams']} DGW teams"
-                            elif chip_key == "bboost":
-                                reason = f"{best['n_matches']} matches"
-                                if best["dgw_teams"] > 0: reason += f" · {best['dgw_teams']} DGW teams"
-                            elif chip_key == "freehit":
-                                reason = f"{best['blank_teams']} teams blanking" if best["blank_teams"] > 0 else f"{best['dgw_teams']} DGW teams"
-                            elif chip_key == "wildcard":
-                                reason = "Best fixture swing point"
+                        for rank, result in enumerate(top_results):
+                            is_best = (rank == 0)
+                            schedule = result["schedule"]
+                            total = result["total"]
+                            gain = total - baseline_total
+
+                            if schedule:
+                                chip_strs = []
+                                for gw in sorted(schedule.keys()):
+                                    chip_name = schedule[gw]
+                                    chip_key = reverse_map.get(chip_name, chip_name)
+                                    label = chip_labels.get(chip_key, chip_name)
+                                    chip_strs.append(f"{label} GW{gw}")
+                                strategy_str = " · ".join(chip_strs)
                             else:
-                                reason = ""
+                                strategy_str = "No chips used"
+
+                            border_col = "#f02d6e" if is_best else "#2a3550"
+                            bg = "#111827" if is_best else "#0d1117"
+                            rank_label = "⭐ BEST" if is_best else f"#{rank + 1}"
+
                             st.markdown(
-                                f'<div style="background:#111827;border-left:3px solid #f02d6e;padding:0.5rem 0.8rem;margin:0.3rem 0;border-radius:0 6px 6px 0;">'
-                                f'<span style="color:#e2e8f0;font-weight:600;">{label}</span> '
-                                f'<span style="color:#f02d6e;font-weight:700;">→ GW{best["gw"]}</span> '
-                                f'<span style="color:#5a6580;font-size:0.78rem;">({reason})</span></div>',
+                                f'<div style="background:{bg};border-left:3px solid {border_col};padding:0.6rem 0.8rem;margin:0.3rem 0;border-radius:0 6px 6px 0;">'
+                                f'<span style="color:{"#f02d6e" if is_best else "#5a6580"};font-weight:700;font-size:0.75rem;">{rank_label}</span> '
+                                f'<span style="color:#e2e8f0;font-weight:600;">{total:.1f} xPts</span> '
+                                f'<span style="color:#34d399;font-size:0.8rem;">(+{gain:.1f})</span> '
+                                f'<span style="color:#8892a8;font-size:0.78rem;">— {strategy_str}</span></div>',
                                 unsafe_allow_html=True,
                             )
 
