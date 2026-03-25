@@ -1570,20 +1570,28 @@ def fetch_manager_team(manager_id, current_gw_id):
         # Extract chips already played
         chips_played = history.get("chips", [])
         # chips_played is a list of {"name": "wildcard", "time": "...", "event": 12}
-        played_chip_names = [c.get("name", "") for c in chips_played]
 
-        # 2025/26 chip allocation:
-        # 2x Wildcard, 2x Free Hit, 2x Triple Captain, 2x Bench Boost
-        all_chips = {
-            "wildcard": 2,
-            "freehit": 2,
-            "3xc": 2,
-            "bboost": 2,
-        }
+        # 2025/26 chip rules:
+        # Each chip refreshes at GW20. You get 1 of each per half-season.
+        # First half: GW1-19, Second half: GW20-38
+        # So at any point, you have 0 or 1 of each chip remaining for the
+        # CURRENT half-season.
+        current_half = 1 if current_gw_id <= 19 else 2
+
         chips_remaining = {}
-        for chip_name, total in all_chips.items():
-            used = sum(1 for c in played_chip_names if c == chip_name)
-            chips_remaining[chip_name] = max(total - used, 0)
+        for chip_name in ["wildcard", "freehit", "3xc", "bboost"]:
+            # Check if this chip was played in the current half
+            if current_half == 1:
+                used_this_half = any(
+                    c.get("name") == chip_name and c.get("event", 0) <= 19
+                    for c in chips_played
+                )
+            else:
+                used_this_half = any(
+                    c.get("name") == chip_name and c.get("event", 0) >= 20
+                    for c in chips_played
+                )
+            chips_remaining[chip_name] = 0 if used_this_half else 1
 
         # 3. Transfer history — gives purchase prices (element_in_cost)
         transfers = requests.get(
@@ -2584,7 +2592,7 @@ def main():
                         "3xc": "👑 Triple Captain", "bboost": "💪 Bench Boost"
                     }
                     remaining_str = " · ".join([
-                        f"{chip_labels.get(k, k)} ×{v}" for k, v in chips_rem.items() if v > 0
+                        chip_labels.get(k, k) for k, v in chips_rem.items() if v > 0
                     ])
                     st.markdown(
                         f'<div style="background:#1a1e2e;border-radius:8px;padding:0.8rem;margin-bottom:0.8rem;">'
@@ -2640,12 +2648,36 @@ def main():
                                 "top_cap": round(top_cap_xpts, 1), "scores": scores,
                             })
 
+                        # === COORDINATED CHIP ALLOCATION ===
+                        # Greedy assignment: pick chips in priority order, each to their
+                        # best available GW. Once a GW is taken, no other chip can use it.
+                        # Priority: Free Hit first (blank GWs are rare and critical),
+                        # then Bench Boost (DGW dependent), Triple Captain, Wildcard last.
+                        chip_priority = ["freehit", "bboost", "3xc", "wildcard"]
+                        assigned = {}  # chip_key -> gw_rec
+                        used_gws = set()
+
+                        for chip_key in chip_priority:
+                            if chips_rem.get(chip_key, 0) == 0:
+                                continue
+                            # Sort GWs by score for this chip, pick best that isn't taken
+                            sorted_recs = sorted(chip_recs, key=lambda r: r["scores"].get(chip_key, 0), reverse=True)
+                            for rec in sorted_recs:
+                                # Wildcard can share a GW with other chips (it's a week-long effect)
+                                if chip_key == "wildcard" or rec["gw"] not in used_gws:
+                                    assigned[chip_key] = rec
+                                    if chip_key != "wildcard":
+                                        used_gws.add(rec["gw"])
+                                    break
+
                         st.markdown("**🧠 Recommended Chip Strategy:**")
-                        for chip_key, chip_count in chips_rem.items():
-                            if chip_count == 0:
+                        st.caption("Chips are allocated to different gameweeks for maximum combined impact.")
+
+                        for chip_key in chip_priority:
+                            if chip_key not in assigned:
                                 continue
                             label = chip_labels.get(chip_key, chip_key)
-                            best = max(chip_recs, key=lambda r: r["scores"].get(chip_key, 0))
+                            best = assigned[chip_key]
                             if chip_key == "3xc":
                                 reason = f"Top captain: {best['top_cap']} xPts"
                                 if best["dgw_teams"] > 0: reason += f" · {best['dgw_teams']} DGW teams"
@@ -2665,16 +2697,6 @@ def main():
                                 f'<span style="color:#5a6580;font-size:0.78rem;">({reason})</span></div>',
                                 unsafe_allow_html=True,
                             )
-                        # Show 2nd use if user has 2 of a chip
-                        for chip_key, chip_count in chips_rem.items():
-                            if chip_count <= 1: continue
-                            label = chip_labels.get(chip_key, chip_key)
-                            sorted_recs = sorted(chip_recs, key=lambda r: r["scores"].get(chip_key, 0), reverse=True)
-                            if len(sorted_recs) >= 2:
-                                st.markdown(
-                                    f'<span style="color:#5a6580;font-size:0.75rem;">2nd {label} → GW{sorted_recs[1]["gw"]}</span>',
-                                    unsafe_allow_html=True,
-                                )
 
                 st.markdown("")
 
