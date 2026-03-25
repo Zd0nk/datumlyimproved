@@ -1567,6 +1567,24 @@ def fetch_manager_team(manager_id, current_gw_id):
 
             free_transfers = ft
 
+        # Extract chips already played
+        chips_played = history.get("chips", [])
+        # chips_played is a list of {"name": "wildcard", "time": "...", "event": 12}
+        played_chip_names = [c.get("name", "") for c in chips_played]
+
+        # 2025/26 chip allocation:
+        # 2x Wildcard, 2x Free Hit, 2x Triple Captain, 2x Bench Boost
+        all_chips = {
+            "wildcard": 2,
+            "freehit": 2,
+            "3xc": 2,
+            "bboost": 2,
+        }
+        chips_remaining = {}
+        for chip_name, total in all_chips.items():
+            used = sum(1 for c in played_chip_names if c == chip_name)
+            chips_remaining[chip_name] = max(total - used, 0)
+
         # 3. Transfer history — gives purchase prices (element_in_cost)
         transfers = requests.get(
             f"{FPL_BASE}/entry/{manager_id}/transfers/",
@@ -1631,6 +1649,7 @@ def fetch_manager_team(manager_id, current_gw_id):
             "active_chip": active_chip,
             "purchase_prices": purchase_prices,
             "selling_prices_api": selling_prices_api,
+            "chips_remaining": chips_remaining,
         }, None
 
     except requests.exceptions.HTTPError:
@@ -2553,6 +2572,109 @@ def main():
                         <div class="metric-value">{squad_xpts:.1f}</div>
                         <div class="metric-sub">{len(my_squad)} players loaded</div>
                     </div>""", unsafe_allow_html=True)
+
+                # === CHIP STRATEGY RECOMMENDER ===
+                chips_rem = team_data.get("chips_remaining", {})
+                has_any_chips = any(v > 0 for v in chips_rem.values())
+
+                if has_any_chips:
+                    st.markdown("")
+                    chip_labels = {
+                        "wildcard": "🃏 Wildcard", "freehit": "⚡ Free Hit",
+                        "3xc": "👑 Triple Captain", "bboost": "💪 Bench Boost"
+                    }
+                    remaining_str = " · ".join([
+                        f"{chip_labels.get(k, k)} ×{v}" for k, v in chips_rem.items() if v > 0
+                    ])
+                    st.markdown(
+                        f'<div style="background:#1a1e2e;border-radius:8px;padding:0.8rem;margin-bottom:0.8rem;">'
+                        f'<span style="color:#f02d6e;font-weight:700;">🎯 Chips Remaining:</span> '
+                        f'<span style="color:#8892a8;">{remaining_str}</span></div>',
+                        unsafe_allow_html=True,
+                    )
+
+                    # Analyse upcoming GWs for chip strategy
+                    events = bootstrap.get("events", [])
+                    future_gws = [e for e in events if not e.get("finished") and e.get("id", 0) >= planning_gw_id]
+                    future_gws = sorted(future_gws, key=lambda e: e["id"])
+
+                    if future_gws and len(qualified) > 0:
+                        chip_recs = []
+                        from collections import Counter
+
+                        for gw_event in future_gws[:12]:
+                            gw_id_c = gw_event["id"]
+                            gw_fixtures = [f for f in fixtures_list if f.get("event") == gw_id_c]
+                            teams_with_fixtures = set()
+                            for f in gw_fixtures:
+                                teams_with_fixtures.add(f["team_h"])
+                                teams_with_fixtures.add(f["team_a"])
+                            n_matches = len(gw_fixtures)
+                            team_fix_count = Counter()
+                            for f in gw_fixtures:
+                                team_fix_count[f["team_h"]] += 1
+                                team_fix_count[f["team_a"]] += 1
+                            dgw_teams = sum(1 for t, c in team_fix_count.items() if c >= 2)
+                            blank_teams = 20 - len(teams_with_fixtures)
+
+                            top_cap_xpts = 0
+                            for _, p in qualified.iterrows():
+                                gw_xpts = xpts_map.get(p["id"], {}).get(gw_id_c, 0)
+                                if gw_xpts > top_cap_xpts:
+                                    top_cap_xpts = gw_xpts
+
+                            scores = {}
+                            scores["3xc"] = round(top_cap_xpts * (1.5 if dgw_teams > 0 else 1.0), 1)
+                            scores["bboost"] = round(n_matches * 0.5 + dgw_teams * 2.0, 1)
+                            scores["freehit"] = round(blank_teams * 3.0 + dgw_teams * 1.5, 1)
+                            wc_horizon = sum(
+                                xpts_map.get(p["id"], {}).get(g, 0)
+                                for _, p in qualified.nlargest(30, "xpts_total").iterrows()
+                                for g in range(gw_id_c, min(gw_id_c + 4, 39))
+                            )
+                            scores["wildcard"] = round(wc_horizon / 100, 1)
+
+                            chip_recs.append({
+                                "gw": gw_id_c, "n_matches": n_matches,
+                                "dgw_teams": dgw_teams, "blank_teams": blank_teams,
+                                "top_cap": round(top_cap_xpts, 1), "scores": scores,
+                            })
+
+                        st.markdown("**🧠 Recommended Chip Strategy:**")
+                        for chip_key, chip_count in chips_rem.items():
+                            if chip_count == 0:
+                                continue
+                            label = chip_labels.get(chip_key, chip_key)
+                            best = max(chip_recs, key=lambda r: r["scores"].get(chip_key, 0))
+                            if chip_key == "3xc":
+                                reason = f"Top captain: {best['top_cap']} xPts"
+                                if best["dgw_teams"] > 0: reason += f" · {best['dgw_teams']} DGW teams"
+                            elif chip_key == "bboost":
+                                reason = f"{best['n_matches']} matches"
+                                if best["dgw_teams"] > 0: reason += f" · {best['dgw_teams']} DGW teams"
+                            elif chip_key == "freehit":
+                                reason = f"{best['blank_teams']} teams blanking" if best["blank_teams"] > 0 else f"{best['dgw_teams']} DGW teams"
+                            elif chip_key == "wildcard":
+                                reason = "Best fixture swing point"
+                            else:
+                                reason = ""
+                            st.markdown(
+                                f'<div style="background:#111827;border-left:3px solid #f02d6e;padding:0.5rem 0.8rem;margin:0.3rem 0;border-radius:0 6px 6px 0;">'
+                                f'<span style="color:#e2e8f0;font-weight:600;">{label}</span> '
+                                f'<span style="color:#f02d6e;font-weight:700;">→ GW{best["gw"]}</span> '
+                                f'<span style="color:#5a6580;font-size:0.78rem;">({reason})</span></div>',
+                                unsafe_allow_html=True,
+                            )
+                        # Show 2nd use if user has 2 of a chip
+                        for chip_key, chip_count in chips_rem.items():
+                            if chip_count <= 1: continue
+                            label = chip_labels.get(chip_key, chip_key)
+                            sorted_recs = sorted(chip_recs, key=lambda r: r["scores"].get(chip_key, 0), reverse=True)
+                            if len(sorted_recs) >= 2:
+                                st.markdown(
+                                    f'<span style="color:#5a6580;font-size:0.75rem;">2nd {label} → GW{sorted_recs[1]["gw"]}</span>',
+                                    unsafe_allow_html=True,
+                                )
 
                 st.markdown("")
 
