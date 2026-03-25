@@ -2648,36 +2648,63 @@ def main():
                                 "top_cap": round(top_cap_xpts, 1), "scores": scores,
                             })
 
-                        # === COORDINATED CHIP ALLOCATION ===
-                        # Greedy assignment: pick chips in priority order, each to their
-                        # best available GW. Once a GW is taken, no other chip can use it.
-                        # Priority: Free Hit first (blank GWs are rare and critical),
-                        # then Bench Boost (DGW dependent), Triple Captain, Wildcard last.
-                        chip_priority = ["freehit", "bboost", "3xc", "wildcard"]
-                        assigned = {}  # chip_key -> gw_rec
-                        used_gws = set()
+                        # === OPTIMAL CHIP ALLOCATION ===
+                        # Try all valid combinations of chip→GW assignments where:
+                        # 1. No two chips share the same GW
+                        # 2. Each chip is assigned to the GW that maximises total xPts impact
+                        #
+                        # We use a brute-force approach over the available chips
+                        # (max 4 chips × 12 GWs = very manageable)
+                        available_chips = [k for k, v in chips_rem.items() if v > 0]
+                        available_gws = [r["gw"] for r in chip_recs]
 
-                        for chip_key in chip_priority:
-                            if chips_rem.get(chip_key, 0) == 0:
-                                continue
-                            # Sort GWs by score for this chip, pick best that isn't taken
-                            sorted_recs = sorted(chip_recs, key=lambda r: r["scores"].get(chip_key, 0), reverse=True)
-                            for rec in sorted_recs:
-                                # Wildcard can share a GW with other chips (it's a week-long effect)
-                                if chip_key == "wildcard" or rec["gw"] not in used_gws:
+                        # Build score lookup: chip_scores[chip_key][gw] = score
+                        chip_scores = {}
+                        for rec in chip_recs:
+                            for ck in available_chips:
+                                if ck not in chip_scores:
+                                    chip_scores[ck] = {}
+                                chip_scores[ck][rec["gw"]] = rec["scores"].get(ck, 0)
+
+                        # Find the best assignment using recursive search
+                        best_assignment = {}
+                        best_total = 0
+
+                        def find_best(remaining_chips, used_gws, current_assignment, current_total):
+                            nonlocal best_assignment, best_total
+                            if not remaining_chips:
+                                if current_total > best_total:
+                                    best_total = current_total
+                                    best_assignment = current_assignment.copy()
+                                return
+                            chip = remaining_chips[0]
+                            rest = remaining_chips[1:]
+                            for gw in available_gws:
+                                if gw in used_gws:
+                                    continue
+                                score = chip_scores.get(chip, {}).get(gw, 0)
+                                current_assignment[chip] = gw
+                                find_best(rest, used_gws | {gw}, current_assignment, current_total + score)
+                            # Also try NOT assigning this chip (if no good GW)
+                            find_best(rest, used_gws, current_assignment, current_total)
+
+                        find_best(available_chips, set(), {}, 0)
+
+                        # Map assignments back to full rec data
+                        assigned = {}
+                        for chip_key, gw in best_assignment.items():
+                            for rec in chip_recs:
+                                if rec["gw"] == gw:
                                     assigned[chip_key] = rec
-                                    if chip_key != "wildcard":
-                                        used_gws.add(rec["gw"])
                                     break
 
                         st.markdown("**🧠 Recommended Chip Strategy:**")
-                        st.caption("Chips are allocated to different gameweeks for maximum combined impact.")
+                        st.caption("Chips allocated to maximise total xPts impact — each on a different gameweek.")
 
-                        for chip_key in chip_priority:
-                            if chip_key not in assigned:
-                                continue
+                        # Display in GW order
+                        for chip_key, rec in sorted(assigned.items(), key=lambda x: x[1]["gw"]):
                             label = chip_labels.get(chip_key, chip_key)
-                            best = assigned[chip_key]
+                            best = rec
                             if chip_key == "3xc":
                                 reason = f"Top captain: {best['top_cap']} xPts"
                                 if best["dgw_teams"] > 0: reason += f" · {best['dgw_teams']} DGW teams"
