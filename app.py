@@ -55,7 +55,7 @@ PTS_GOAL = {1: 10, 2: 6, 3: 5, 4: 4}
 PTS_ASSIST = 3
 PTS_CS = {1: 4, 2: 4, 3: 1, 4: 0}
 PTS_APPEARANCE = 2  # 60+ mins
-PTS_BONUS_AVG = 0.5  # average bonus per appearance
+PTS_BONUS_AVG = 0.35  # average bonus per appearance (PL-wide avg ~0.3-0.4)
 
 # Team colours: FPL short name -> (primary, secondary, text_colour)
 TEAM_COLOURS = {
@@ -316,19 +316,15 @@ def load_live_odds():
                 hp, dp, ap = (1/ah)/ornd, (1/ad)/ornd, (1/aa)/ornd
 
                 # Over/under 2.5 goals → implied total goals for the match
-                # If over 2.5 odds average to e.g. 1.85, implied prob = 1/1.85 = 54%
-                # We can estimate expected total goals from this
+                # Better empirical mapping from over 2.5 probability:
+                # 40% → ~2.15, 50% → ~2.45, 60% → ~2.65, 70% → ~2.85
                 if over_lines:
                     avg_over_price = np.mean(over_lines)
-                    over_prob = min(1.0 / avg_over_price, 0.95)  # rough, no overround removal needed for single line
-                    # Convert over 2.5 probability to expected total goals
-                    # Empirical approximation: xGoals ≈ 2.5 + (over_prob - 0.5) * 2.5
-                    # When over_prob = 0.5 → 2.5 goals, when 0.7 → 3.0, when 0.3 → 2.0
-                    expected_total_goals = 2.5 + (over_prob - 0.5) * 2.5
-                    expected_total_goals = max(expected_total_goals, 1.0)  # floor at 1.0
+                    over_prob = min(1.0 / avg_over_price, 0.95)
+                    expected_total_goals = 1.75 + over_prob * 1.6
+                    expected_total_goals = max(expected_total_goals, 1.5)
                 else:
-                    # Fallback: derive from win probabilities
-                    expected_total_goals = 2.7  # PL average
+                    expected_total_goals = 2.6  # PL average ~2.6 goals per match
 
                 # Split total goals between home and away using win probabilities
                 # Higher win prob → more goals for that team
@@ -944,10 +940,13 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
                 opp_atk_str_fix = None  # will use season average below
                 cs_prob_from_live = None
 
-            # Scale factor: easier opponent = higher xG
-            # opp_def_str > 1 means they concede more → easier
-            scale = (opp_def_str * 0.5 + team_atk_str * 0.3 + 0.2)
-            home_boost = 1.1 if fix["home"] else 0.95
+            # Scale factor: blend opponent weakness with team strength
+            # Dampened to prevent runaway inflation for strong teams vs weak opponents
+            # Average case should be ~1.0 (league average vs league average)
+            raw_scale = (opp_def_str * 0.4 + team_atk_str * 0.2 + 0.4)
+            # Soft cap: compress extreme values towards 1.0
+            scale = 1.0 + (raw_scale - 1.0) * 0.7  # 70% of the deviation from 1.0
+            home_boost = 1.08 if fix["home"] else 0.96
 
             adj_xg = xg_per90 * scale * home_boost
             adj_xa = xa_per90 * scale * home_boost
@@ -1026,17 +1025,22 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
             # Goals conceded penalty for GK/DEF
             # FPL rule: -1 point per 2 goals conceded (i.e. -0.5 per goal) from goal 1
             if pos in [1, 2]:
-                expected_conceded = league_avg_goals * opp_atk_str
-                if not fix["home"]:
-                    expected_conceded *= 1.1  # away teams concede slightly more
+                if live_fixture:
+                    # Use bookmaker-implied expected goals directly
+                    if fix["home"]:
+                        expected_conceded = live_fixture.get("away_expected_goals", league_avg_goals)
+                    else:
+                        expected_conceded = live_fixture.get("home_expected_goals", league_avg_goals)
+                else:
+                    expected_conceded = league_avg_goals * opp_atk_str
+                    if not fix["home"]:
+                        expected_conceded *= 1.05  # slight away penalty
                 xpts -= expected_conceded * 0.5 * full_game_prob
 
             # Save points for GKs: ~1pt per 3 saves
-            # Better estimate: GKs on bad teams face more shots but also concede more
-            # Average ~3.5 saves/game across PL, but scale by opponent attack
             if pos == 1:
-                expected_saves = 3.5 * opp_atk_str * 0.7  # not all shots are saveable
-                save_points = (expected_saves / 3.0)  # 1 pt per 3 saves
+                expected_saves = 3.0 * opp_atk_str * 0.7
+                save_points = (expected_saves / 3.0)
                 xpts += save_points * full_game_prob
 
             # ============================================================
@@ -1115,7 +1119,7 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
                     "assist_pts": round(adj_xa * expected_90s * PTS_ASSIST, 2),
                     "cs_pts": round(cs_prob * PTS_CS.get(pos, 0) * full_game_prob, 2),
                     "bonus_pts": round(PTS_BONUS_AVG * play_prob, 2),
-                    "conceded_pts": round(-(league_avg_goals * opp_atk_str * (1.1 if not fix["home"] else 1.0) * 0.5 * full_game_prob), 2) if pos in [1, 2] else 0,
+                    "conceded_pts": round(-(expected_conceded * 0.5 * full_game_prob), 2) if pos in [1, 2] else 0,
                     "defcon_pts": round(defcon_xpts, 2) if defcon_per90 > 0 and pos in [2, 3, 4] and nineties >= 3 else 0,
                     "total": round(max(xpts, 0), 2),
                 }
