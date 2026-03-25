@@ -2539,10 +2539,10 @@ def main():
         </div>""", unsafe_allow_html=True)
 
     # === Tabs ===
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         "🏠 My Team", "📊 Dashboard", "👥 Player Projections",
         "⭐ Optimal Squad (MILP)", "🔄 Transfer Planner", "📅 Fixtures",
-        "🔬 Backtest"
+        "🔬 Backtest", "🎯 Chip Strategy"
     ])
 
     active = df[df["minutes"] > 0].copy()
@@ -2578,6 +2578,8 @@ def main():
 
             with st.spinner("Fetching your team..."):
                 team_data, team_err = fetch_manager_team(manager_id, gw_id)
+                if team_data:
+                    st.session_state["team_data"] = team_data
 
             if team_err:
                 st.error(f"Could not load team: {team_err}")
@@ -2616,250 +2618,26 @@ def main():
                         <div class="metric-sub">{len(my_squad)} players loaded</div>
                     </div>""", unsafe_allow_html=True)
 
-                # === CHIP STRATEGY RECOMMENDER ===
+                # === CHIPS REMAINING (lightweight display) ===
                 chips_rem = team_data.get("chips_remaining", {})
                 has_any_chips = any(v > 0 for v in chips_rem.values())
                 ft_available = team_data.get("free_transfers", 1)
 
                 if has_any_chips:
-                    st.markdown("")
-                    chip_labels = {
+                    chip_labels_brief = {
                         "wildcard": "🃏 Wildcard", "freehit": "⚡ Free Hit",
                         "3xc": "👑 Triple Captain", "bboost": "💪 Bench Boost"
                     }
                     remaining_str = " · ".join([
-                        chip_labels.get(k, k) for k, v in chips_rem.items() if v > 0
+                        chip_labels_brief.get(k, k) for k, v in chips_rem.items() if v > 0
                     ])
                     st.markdown(
                         f'<div style="background:#1a1e2e;border-radius:8px;padding:0.8rem;margin-bottom:0.8rem;">'
                         f'<span style="color:#f02d6e;font-weight:700;">🎯 Chips Remaining:</span> '
-                        f'<span style="color:#8892a8;">{remaining_str}</span></div>',
+                        f'<span style="color:#8892a8;">{remaining_str}</span> · '
+                        f'<span style="color:#5a6580;font-size:0.75rem;">See 🎯 Chip Strategy tab for optimal timing</span></div>',
                         unsafe_allow_html=True,
                     )
-
-                    # Analyse upcoming GWs for chip strategy
-                    events = bootstrap.get("events", [])
-                    future_gws = [e for e in events if not e.get("finished") and e.get("id", 0) >= planning_gw_id]
-                    future_gws = sorted(future_gws, key=lambda e: e["id"])
-
-                    if future_gws and len(qualified) > 0:
-                        chip_recs = []
-                        from collections import Counter
-
-                        # Pre-compute per-GW data for chip scoring
-                        for gw_event in future_gws[:12]:
-                            gw_id_c = gw_event["id"]
-                            gw_fixtures = [f for f in fixtures_list if f.get("event") == gw_id_c]
-                            teams_with_fixtures = set()
-                            for f in gw_fixtures:
-                                teams_with_fixtures.add(f["team_h"])
-                                teams_with_fixtures.add(f["team_a"])
-                            n_matches = len(gw_fixtures)
-                            team_fix_count = Counter()
-                            for f in gw_fixtures:
-                                team_fix_count[f["team_h"]] += 1
-                                team_fix_count[f["team_a"]] += 1
-                            dgw_teams = sum(1 for t, c in team_fix_count.items() if c >= 2)
-                            blank_teams = 20 - len(teams_with_fixtures)
-
-                            # Get all player xPts for this GW
-                            all_gw_xpts = []
-                            for _, p in qualified.iterrows():
-                                gw_xpts = xpts_map.get(p["id"], {}).get(gw_id_c, 0)
-                                if gw_xpts > 0:
-                                    all_gw_xpts.append({
-                                        "id": p["id"], "xpts": gw_xpts, "pos_id": p["pos_id"],
-                                        "team_id": p["team_id"], "price": p["now_cost"],
-                                        "name": p["name"],
-                                    })
-                            all_gw_xpts.sort(key=lambda x: x["xpts"], reverse=True)
-
-                            # Top captain xPts
-                            top_cap_xpts = all_gw_xpts[0]["xpts"] if all_gw_xpts else 0
-
-                            # === SCORE EACH CHIP AS ACTUAL xPTS GAINED ===
-
-                            # TRIPLE CAPTAIN: extra points = top_captain_xPts * 1 (the extra double)
-                            # Normal captain = 2x, TC = 3x, so gain = 1x the captain's xPts
-                            tc_gain = top_cap_xpts
-
-                            # BENCH BOOST: extra points = sum of bench xPts
-                            # Estimate bench xPts: after picking best XI (11 players), sum the next 4
-                            # Simple approximation: sort all by xPts, top 11 = XI, next 4 = bench
-                            if len(all_gw_xpts) >= 15:
-                                bench_xpts = sum(p["xpts"] for p in all_gw_xpts[11:15])
-                            else:
-                                bench_xpts = 0
-                            bb_gain = bench_xpts
-
-                            # FREE HIT: extra points = best possible 15 xPts - current squad xPts
-                            # Approximate: best possible XI from entire pool vs user's current squad
-                            my_squad_gw_xpts = sum(
-                                xpts_map.get(pid, {}).get(gw_id_c, 0)
-                                for pid in team_data.get("squad_ids", [])
-                            )
-                            # Best possible squad: top 15 respecting position constraints (rough)
-                            best_possible_xpts = sum(p["xpts"] for p in all_gw_xpts[:15]) if len(all_gw_xpts) >= 15 else 0
-                            fh_gain = max(best_possible_xpts - my_squad_gw_xpts, 0)
-
-                            # WILDCARD: extra points = improved squad xPts over next 4 GWs
-                            # Compare current squad's 4-GW total vs best possible 4-GW total
-                            my_4gw = sum(
-                                xpts_map.get(pid, {}).get(g, 0)
-                                for pid in team_data.get("squad_ids", [])
-                                for g in range(gw_id_c, min(gw_id_c + 4, 39))
-                            )
-                            # Best possible 4-GW (rough: top 15 players by total over 4 GWs)
-                            player_4gw = []
-                            for _, p in qualified.iterrows():
-                                total_4 = sum(xpts_map.get(p["id"], {}).get(g, 0) for g in range(gw_id_c, min(gw_id_c + 4, 39)))
-                                player_4gw.append(total_4)
-                            player_4gw.sort(reverse=True)
-                            best_4gw = sum(player_4gw[:15]) if len(player_4gw) >= 15 else 0
-                            wc_gain = max(best_4gw - my_4gw, 0)
-
-                            scores = {
-                                "3xc": round(tc_gain, 1),
-                                "bboost": round(bb_gain, 1),
-                                "freehit": round(fh_gain, 1),
-                                "wildcard": round(wc_gain, 1),
-                            }
-
-                            chip_recs.append({
-                                "gw": gw_id_c, "n_matches": n_matches,
-                                "dgw_teams": dgw_teams, "blank_teams": blank_teams,
-                                "top_cap": round(top_cap_xpts, 1), "scores": scores,
-                                "bench_xpts": round(bench_xpts, 1),
-                                "fh_gain": round(fh_gain, 1),
-                            })
-
-                        # === OPTIMAL CHIP ALLOCATION ===
-                        # Simulate the 6-GW plan with different chip combinations
-                        # and pick the one that produces the highest total xPts.
-                        # This is the only way to correctly measure chip value —
-                        # each chip's benefit depends on which OTHER chips are active.
-                        available_chips = [k for k, v in chips_rem.items() if v > 0]
-                        available_gws = [r["gw"] for r in chip_recs]
-
-                        # Map chip names from API format to planner format
-                        chip_name_map = {
-                            "wildcard": "wildcard", "freehit": "free_hit",
-                            "3xc": "triple_captain", "bboost": "bench_boost",
-                        }
-
-                        # Generate all valid chip→GW combinations
-                        # With max 4 chips and ~8 remaining GWs this is very manageable
-                        from itertools import combinations, permutations
-
-                        # Build list of (chip, gw) possibilities
-                        best_plan_total = -1
-                        best_chip_schedule = {}
-                        best_plan = None
-
-                        # First: evaluate with NO chips (baseline)
-                        try:
-                            baseline_plan = build_rolling_plan(
-                                my_squad, df,
-                                bank=team_data["bank"],
-                                free_transfers=ft_available,
-                                purchase_prices=team_data.get("purchase_prices", {}),
-                                selling_prices_api=team_data.get("selling_prices_api", {}),
-                                xpts_map=xpts_map,
-                                planning_gw_id=planning_gw_id,
-                                n_gws=6,
-                                chip_schedule={},
-                                team_fixture_counts=team_fixture_counts,
-                            )
-                            baseline_total = sum(g.get("total_xpts", 0) for g in baseline_plan) if baseline_plan else 0
-                        except Exception:
-                            baseline_total = 0
-                            baseline_plan = None
-
-                        # Generate all possible chip schedules
-                        # Each chip gets assigned to one GW, no two chips on same GW
-                        plan_gws = [planning_gw_id + i for i in range(6)]
-                        chip_combos = [{}]  # start with empty (no chips)
-
-                        if len(available_chips) > 0:
-                            # For each subset of chips (use all, or some)
-                            for n_chips in range(1, len(available_chips) + 1):
-                                for chip_subset in combinations(available_chips, n_chips):
-                                    # For each permutation of GW assignments
-                                    for gw_perm in permutations(plan_gws, n_chips):
-                                        schedule = {}
-                                        for c, g in zip(chip_subset, gw_perm):
-                                            schedule[g] = chip_name_map.get(c, c)
-                                        chip_combos.append(schedule)
-
-                        # Cap combos to prevent timeout (if too many, sample smartly)
-                        if len(chip_combos) > 200:
-                            # Keep empty + prioritise combos using all available chips
-                            full_chip_combos = [c for c in chip_combos if len(c) == len(available_chips)]
-                            partial_combos = [c for c in chip_combos if 0 < len(c) < len(available_chips)]
-                            import random
-                            random.shuffle(partial_combos)
-                            chip_combos = [{}] + full_chip_combos[:150] + partial_combos[:49]
-
-                        all_results = []
-                        with st.spinner(f"Evaluating {len(chip_combos)} chip strategies..."):
-                            for schedule in chip_combos:
-                                try:
-                                    plan = build_rolling_plan(
-                                        my_squad, df,
-                                        bank=team_data["bank"],
-                                        free_transfers=ft_available,
-                                        purchase_prices=team_data.get("purchase_prices", {}),
-                                        selling_prices_api=team_data.get("selling_prices_api", {}),
-                                        xpts_map=xpts_map,
-                                        planning_gw_id=planning_gw_id,
-                                        n_gws=6,
-                                        chip_schedule=schedule,
-                                        team_fixture_counts=team_fixture_counts,
-                                    )
-                                    if plan:
-                                        total = sum(g.get("total_xpts", 0) for g in plan)
-                                        all_results.append({"schedule": dict(schedule), "total": total})
-                                except Exception:
-                                    continue
-
-                        all_results.sort(key=lambda x: x["total"], reverse=True)
-
-                        st.markdown("**🧠 Optimal Chip Strategy:**")
-                        st.caption(f"Evaluated {len(chip_combos)} combinations over 6 GWs. "
-                                   f"Baseline (no chips): {baseline_total:.1f} xPts")
-
-                        top_results = all_results[:3]
-                        reverse_map = {v: k for k, v in chip_name_map.items()}
-
-                        for rank, result in enumerate(top_results):
-                            is_best = (rank == 0)
-                            schedule = result["schedule"]
-                            total = result["total"]
-                            gain = total - baseline_total
-
-                            if schedule:
-                                chip_strs = []
-                                for gw in sorted(schedule.keys()):
-                                    chip_name = schedule[gw]
-                                    chip_key = reverse_map.get(chip_name, chip_name)
-                                    label = chip_labels.get(chip_key, chip_name)
-                                    chip_strs.append(f"{label} GW{gw}")
-                                strategy_str = " · ".join(chip_strs)
-                            else:
-                                strategy_str = "No chips used"
-
-                            border_col = "#f02d6e" if is_best else "#2a3550"
-                            bg = "#111827" if is_best else "#0d1117"
-                            rank_label = "⭐ BEST" if is_best else f"#{rank + 1}"
-
-                            st.markdown(
-                                f'<div style="background:{bg};border-left:3px solid {border_col};padding:0.6rem 0.8rem;margin:0.3rem 0;border-radius:0 6px 6px 0;">'
-                                f'<span style="color:{"#f02d6e" if is_best else "#5a6580"};font-weight:700;font-size:0.75rem;">{rank_label}</span> '
-                                f'<span style="color:#e2e8f0;font-weight:600;">{total:.1f} xPts</span> '
-                                f'<span style="color:#34d399;font-size:0.8rem;">(+{gain:.1f})</span> '
-                                f'<span style="color:#8892a8;font-size:0.78rem;">— {strategy_str}</span></div>',
-                                unsafe_allow_html=True,
-                            )
 
                 st.markdown("")
 
@@ -4195,6 +3973,163 @@ def main():
 
         else:
             st.info("Need completed gameweeks to run backtest.")
+
+    # ==================== CHIP STRATEGY ====================
+    with tab8:
+        st.markdown(
+            '<div class="section-header">🎯 Chip Strategy Optimiser '
+            '<span class="source-tag src-model">Brute-Force</span></div>',
+            unsafe_allow_html=True,
+        )
+        st.caption("Evaluates every possible chip-to-gameweek combination and picks the strategy "
+                    "that maximises your total xPts over the next 6 GWs. Requires your FPL ID to be loaded.")
+
+        # Need team data for this feature
+        if "team_data" not in st.session_state or st.session_state.get("team_data") is None:
+            st.info("Load your FPL team in the 🏠 My Team tab first, then come back here.")
+        else:
+            team_data_chip = st.session_state["team_data"]
+            chips_rem_chip = team_data_chip.get("chips_remaining", {})
+            has_chips = any(v > 0 for v in chips_rem_chip.values())
+
+            if not has_chips:
+                st.info("You've used all your chips for this half-season. No strategy to optimise.")
+            else:
+                chip_labels_chip = {
+                    "wildcard": "🃏 Wildcard", "freehit": "⚡ Free Hit",
+                    "3xc": "👑 Triple Captain", "bboost": "💪 Bench Boost"
+                }
+                remaining_str_chip = " · ".join([
+                    chip_labels_chip.get(k, k) for k, v in chips_rem_chip.items() if v > 0
+                ])
+                st.markdown(
+                    f'<div style="background:#1a1e2e;border-radius:8px;padding:0.8rem;margin-bottom:0.8rem;">'
+                    f'<span style="color:#f02d6e;font-weight:700;">🎯 Chips Remaining:</span> '
+                    f'<span style="color:#8892a8;">{remaining_str_chip}</span></div>',
+                    unsafe_allow_html=True,
+                )
+
+                my_squad_chip = df[df["id"].isin(team_data_chip["squad_ids"])].copy()
+                ft_chip = team_data_chip.get("free_transfers", 1)
+
+                if st.button("🚀 Find Optimal Chip Strategy", use_container_width=True, type="primary"):
+                    from itertools import combinations, permutations
+                    from collections import Counter
+
+                    available_chips = [k for k, v in chips_rem_chip.items() if v > 0]
+                    chip_name_map = {
+                        "wildcard": "wildcard", "freehit": "free_hit",
+                        "3xc": "triple_captain", "bboost": "bench_boost",
+                    }
+                    plan_gws = [planning_gw_id + i for i in range(6)]
+
+                    # Generate all valid chip→GW combinations
+                    chip_combos = [{}]
+                    if len(available_chips) > 0:
+                        for n_chips in range(1, len(available_chips) + 1):
+                            for chip_subset in combinations(available_chips, n_chips):
+                                for gw_perm in permutations(plan_gws, n_chips):
+                                    schedule = {}
+                                    for c, g in zip(chip_subset, gw_perm):
+                                        schedule[g] = chip_name_map.get(c, c)
+                                    chip_combos.append(schedule)
+
+                    # Cap combos
+                    if len(chip_combos) > 200:
+                        full_combos = [c for c in chip_combos if len(c) == len(available_chips)]
+                        partial = [c for c in chip_combos if 0 < len(c) < len(available_chips)]
+                        import random
+                        random.shuffle(partial)
+                        chip_combos = [{}] + full_combos[:150] + partial[:49]
+
+                    # Evaluate baseline (no chips)
+                    try:
+                        baseline_plan = build_rolling_plan(
+                            my_squad_chip, df,
+                            bank=team_data_chip["bank"],
+                            free_transfers=ft_chip,
+                            purchase_prices=team_data_chip.get("purchase_prices", {}),
+                            selling_prices_api=team_data_chip.get("selling_prices_api", {}),
+                            xpts_map=xpts_map,
+                            planning_gw_id=planning_gw_id,
+                            n_gws=6,
+                            chip_schedule={},
+                            team_fixture_counts=team_fixture_counts,
+                        )
+                        baseline_total = sum(g.get("total_xpts", 0) for g in baseline_plan) if baseline_plan else 0
+                    except Exception:
+                        baseline_total = 0
+
+                    # Evaluate all combinations
+                    all_chip_results = []
+                    progress = st.progress(0, text="Evaluating chip strategies...")
+                    for idx, schedule in enumerate(chip_combos):
+                        try:
+                            plan = build_rolling_plan(
+                                my_squad_chip, df,
+                                bank=team_data_chip["bank"],
+                                free_transfers=ft_chip,
+                                purchase_prices=team_data_chip.get("purchase_prices", {}),
+                                selling_prices_api=team_data_chip.get("selling_prices_api", {}),
+                                xpts_map=xpts_map,
+                                planning_gw_id=planning_gw_id,
+                                n_gws=6,
+                                chip_schedule=schedule,
+                                team_fixture_counts=team_fixture_counts,
+                            )
+                            if plan:
+                                total = sum(g.get("total_xpts", 0) for g in plan)
+                                all_chip_results.append({"schedule": dict(schedule), "total": total})
+                        except Exception:
+                            continue
+                        if (idx + 1) % 10 == 0 or idx == len(chip_combos) - 1:
+                            progress.progress((idx + 1) / len(chip_combos),
+                                              text=f"Evaluating... {idx + 1}/{len(chip_combos)}")
+                    progress.empty()
+
+                    all_chip_results.sort(key=lambda x: x["total"], reverse=True)
+
+                    # Display results
+                    st.markdown("### Results")
+                    st.markdown(
+                        f'<span style="color:#8892a8;">Evaluated <b>{len(chip_combos)}</b> combinations · '
+                        f'Baseline (no chips): <b>{baseline_total:.1f}</b> xPts</span>',
+                        unsafe_allow_html=True,
+                    )
+                    st.markdown("")
+
+                    reverse_map = {v: k for k, v in chip_name_map.items()}
+                    top_results = all_chip_results[:5]
+
+                    for rank, result in enumerate(top_results):
+                        is_best = (rank == 0)
+                        schedule = result["schedule"]
+                        total = result["total"]
+                        gain = total - baseline_total
+
+                        if schedule:
+                            chip_strs = []
+                            for gw in sorted(schedule.keys()):
+                                chip_name = schedule[gw]
+                                chip_key = reverse_map.get(chip_name, chip_name)
+                                label = chip_labels_chip.get(chip_key, chip_name)
+                                chip_strs.append(f"{label} GW{gw}")
+                            strategy_str = " · ".join(chip_strs)
+                        else:
+                            strategy_str = "No chips used — save for later"
+
+                        border_col = "#f02d6e" if is_best else "#2a3550"
+                        bg = "#111827" if is_best else "#0d1117"
+                        rank_label = "⭐ BEST" if is_best else f"#{rank + 1}"
+
+                        st.markdown(
+                            f'<div style="background:{bg};border-left:3px solid {border_col};padding:0.7rem 0.8rem;margin:0.4rem 0;border-radius:0 6px 6px 0;">'
+                            f'<span style="color:{"#f02d6e" if is_best else "#5a6580"};font-weight:700;font-size:0.8rem;">{rank_label}</span> '
+                            f'<span style="color:#e2e8f0;font-weight:700;font-size:1.1rem;">{total:.1f} xPts</span> '
+                            f'<span style="color:#34d399;font-size:0.85rem;">(+{gain:.1f} vs no chips)</span><br>'
+                            f'<span style="color:#8892a8;font-size:0.8rem;">{strategy_str}</span></div>',
+                            unsafe_allow_html=True,
+                        )
 
     # === Footer ===
     st.markdown("---")
