@@ -91,49 +91,37 @@ GK_COLOURS = {
 }
 
 
-def make_shirt_svg(team_short, xpts_text, is_gk=False, is_captain=False, width=52, height=52, player_name=""):
-    """Generate an inline SVG circular badge with team colours, xPts, and player initials."""
+def make_shirt_svg(team_short, xpts_text, is_gk=False, is_captain=False, width=56, height=56, player_name=""):
+    """Generate an inline SVG circular badge with team colours and xPts."""
     if is_gk:
         primary, secondary, text_col = GK_COLOURS.get(team_short, GK_COLOURS["default"])
     else:
         primary, secondary, text_col = TEAM_COLOURS.get(team_short, ("#666666", "#FFFFFF", "#FFFFFF"))
 
-    # Get player initials (e.g. "Salah" -> "MS", "De Bruyne" -> "DB")
-    initials = ""
+    # Get short surname (max 8 chars)
+    short_name = ""
     if player_name:
         parts = player_name.strip().split()
-        if len(parts) >= 2:
-            initials = (parts[0][0] + parts[-1][0]).upper()
-        elif len(parts) == 1:
-            initials = parts[0][:2].upper()
-
-    cap_badge = ""
-    if is_captain:
-        cap_badge = (
-            f'<circle cx="{width-6}" cy="8" r="7" fill="#FFD700" stroke="#1a1e2e" stroke-width="1"/>'
-            f'<text x="{width-6}" y="11.5" text-anchor="middle" font-size="8" font-weight="bold" fill="#000" font-family="Arial,sans-serif">C</text>'
-        )
+        short_name = parts[-1][:8] if parts else ""
 
     r = min(width, height) / 2 - 2
     cx = width / 2
     cy = height / 2
 
-    svg = f'''<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg">
-        <!-- Outer ring -->
-        <circle cx="{cx}" cy="{cy}" r="{r}" fill="{primary}" stroke="{secondary}" stroke-width="2"/>
-        <!-- Inner circle (subtle gradient effect) -->
-        <circle cx="{cx}" cy="{cy}" r="{r-3}" fill="{primary}" opacity="0.85"/>
-        <!-- Initials (top) -->
-        <text x="{cx}" y="{cy - 3}" text-anchor="middle"
-              font-size="9" font-weight="400" fill="{text_col}" opacity="0.7"
-              font-family="Arial,sans-serif">{initials}</text>
-        <!-- xPts (bottom, larger) -->
-        <text x="{cx}" y="{cy + 10}" text-anchor="middle"
-              font-size="12" font-weight="700" fill="{text_col}"
-              font-family="Arial,sans-serif"
-              style="text-shadow:0 1px 2px rgba(0,0,0,0.4);">{xpts_text}</text>
-        {cap_badge}
-    </svg>'''
+    cap = ""
+    if is_captain:
+        cap = (f'<circle cx="{width-5}" cy="7" r="6.5" fill="#FFD700" stroke="#1a1e2e" stroke-width="1"/>'
+               f'<text x="{width-5}" y="10.5" text-anchor="middle" font-size="8" font-weight="bold" fill="#000" font-family="Arial,sans-serif">C</text>')
+
+    # Build as one line to avoid Streamlit HTML parsing issues
+    svg = (
+        f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg">'
+        f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="{primary}" stroke="{secondary}" stroke-width="2"/>'
+        f'<text x="{cx}" y="{cy-2}" text-anchor="middle" font-size="8" font-weight="400" fill="{text_col}" opacity="0.75" font-family="Arial,sans-serif">{short_name}</text>'
+        f'<text x="{cx}" y="{cy+12}" text-anchor="middle" font-size="13" font-weight="700" fill="{text_col}" font-family="Arial,sans-serif">{xpts_text}</text>'
+        f'{cap}'
+        f'</svg>'
+    )
     return svg
 
 # ============================================================
@@ -2595,24 +2583,18 @@ def main():
                                 cap_badge = " (C)" if is_cap else (" (V)" if p.get("is_vice", False) else "")
                                 shirt_svg = make_shirt_svg(p["team"], f"{p['xpts_next_gw']:.1f}", is_gk=is_gk, is_captain=is_cap, player_name=p.get("name", ""))
                                 with cols[i]:
-                                    st.markdown(f"""<div style="text-align:center;">
-                                        {shirt_svg}
-                                        <div class="pitch-name">{p['name']}{cap_badge}</div>
-                                        <div class="pitch-price">£{p['price']:.1f}m · {p['xpts_total']:.1f} xPts</div>
-                                    </div>""", unsafe_allow_html=True)
+                                    html = f'<div style="text-align:center;">{shirt_svg}<div class="pitch-name">{p["name"]}{cap_badge}</div><div class="pitch-price">£{p["price"]:.1f}m · {p["xpts_total"]:.1f} xPts</div></div>'
+                                    st.markdown(html, unsafe_allow_html=True)
 
                     if len(bench) > 0:
                         st.markdown("**Bench**")
                         bcols = st.columns(max(len(bench), 1))
                         for i, (_, p) in enumerate(bench.iterrows()):
                             is_gk = (p["pos_id"] == 1)
-                            shirt_svg = make_shirt_svg(p["team"], f"{p['xpts_next_gw']:.1f}", is_gk=is_gk, width=40, height=40, player_name=p.get("name", ""))
+                            shirt_svg = make_shirt_svg(p["team"], f"{p['xpts_next_gw']:.1f}", is_gk=is_gk, width=44, height=44, player_name=p.get("name", ""))
                             with bcols[i]:
-                                st.markdown(f"""<div style="text-align:center;opacity:0.6;">
-                                    {shirt_svg}
-                                    <div class="pitch-name">{p['name']}</div>
-                                    <div class="pitch-price">{p['pos']} · £{p['price']:.1f}m</div>
-                                </div>""", unsafe_allow_html=True)
+                                html = f'<div style="text-align:center;opacity:0.6;">{shirt_svg}<div class="pitch-name">{p["name"]}</div><div class="pitch-price">{p["pos"]} · £{p["price"]:.1f}m</div></div>'
+                                st.markdown(html, unsafe_allow_html=True)
 
                     st.markdown("")
 
@@ -2902,11 +2884,8 @@ def main():
                                                     gw_xpts = p.get("xpts_gw", 0)
                                                     shirt_svg = make_shirt_svg(p.get("team", "???"), f"{gw_xpts:.1f}", is_gk=is_gk, is_captain=is_cap, player_name=p.get("name", ""))
                                                     with cols[ci]:
-                                                        st.markdown(f"""<div style="text-align:center;">
-                                                            {shirt_svg}
-                                                            <div class="pitch-name">{p['name']}</div>
-                                                            <div class="pitch-price">£{p['price']:.1f}m</div>
-                                                        </div>""", unsafe_allow_html=True)
+                                                        html = f'<div style="text-align:center;">{shirt_svg}<div class="pitch-name">{p["name"]}</div><div class="pitch-price">£{p["price"]:.1f}m</div></div>'
+                                                        st.markdown(html, unsafe_allow_html=True)
 
                                         if bench is not None and len(bench) > 0:
                                             if is_bb:
@@ -3490,24 +3469,18 @@ def main():
                                 is_gk = (p["pos_id"] == 1)
                                 shirt_svg = make_shirt_svg(p["team"], f"{p['xpts_next_gw']:.1f}", is_gk=is_gk, player_name=p.get("name", ""))
                                 with cols[i]:
-                                    st.markdown(f"""<div style="text-align:center;">
-                                        {shirt_svg}
-                                        <div class="pitch-name">{p['name']}</div>
-                                        <div class="pitch-price">£{p['price']:.1f}m · {p['form_str']}</div>
-                                    </div>""", unsafe_allow_html=True)
+                                    html = f'<div style="text-align:center;">{shirt_svg}<div class="pitch-name">{p["name"]}</div><div class="pitch-price">£{p["price"]:.1f}m · {p["form_str"]}</div></div>'
+                                    st.markdown(html, unsafe_allow_html=True)
 
                 if bench is not None and len(bench) > 0:
                     st.markdown("**Bench**")
                     bcols = st.columns(len(bench))
                     for i, (_, p) in enumerate(bench.iterrows()):
                         is_gk = (p["pos_id"] == 1)
-                        shirt_svg = make_shirt_svg(p["team"], f"{p['xpts_next_gw']:.1f}", is_gk=is_gk, width=40, height=40, player_name=p.get("name", ""))
+                        shirt_svg = make_shirt_svg(p["team"], f"{p['xpts_next_gw']:.1f}", is_gk=is_gk, width=44, height=44, player_name=p.get("name", ""))
                         with bcols[i]:
-                            st.markdown(f"""<div style="text-align:center;opacity:0.65;">
-                                {shirt_svg}
-                                <div class="pitch-name">{p['name']}</div>
-                                <div class="pitch-price">{p['pos']} · £{p['price']:.1f}m</div>
-                            </div>""", unsafe_allow_html=True)
+                            html = f'<div style="text-align:center;opacity:0.65;">{shirt_svg}<div class="pitch-name">{p["name"]}</div><div class="pitch-price">{p["pos"]} · £{p["price"]:.1f}m</div></div>'
+                            st.markdown(html, unsafe_allow_html=True)
 
                 st.markdown("")
                 st.subheader("Full Squad Breakdown")
