@@ -4157,49 +4157,10 @@ def main():
                     }
                     plan_gws = [planning_gw_id + i for i in range(6)]
 
-                    # Generate all valid chip→GW combinations
-                    chip_combos = [{}]
-                    if len(available_chips) > 0:
-                        for n_chips in range(1, len(available_chips) + 1):
-                            for chip_subset in combinations(available_chips, n_chips):
-                                for gw_perm in permutations(plan_gws, n_chips):
-                                    schedule = {}
-                                    for c, g in zip(chip_subset, gw_perm):
-                                        schedule[g] = chip_name_map.get(c, c)
-                                    chip_combos.append(schedule)
-
-                    # Cap combos
-                    if len(chip_combos) > 200:
-                        full_combos = [c for c in chip_combos if len(c) == len(available_chips)]
-                        partial = [c for c in chip_combos if 0 < len(c) < len(available_chips)]
-                        import random
-                        random.shuffle(partial)
-                        chip_combos = [{}] + full_combos[:150] + partial[:49]
-
-                    # Evaluate baseline (no chips)
-                    try:
-                        baseline_plan = build_rolling_plan(
-                            my_squad_chip, df,
-                            bank=team_data_chip["bank"],
-                            free_transfers=ft_chip,
-                            purchase_prices=team_data_chip.get("purchase_prices", {}),
-                            selling_prices_api=team_data_chip.get("selling_prices_api", {}),
-                            xpts_map=xpts_map,
-                            planning_gw_id=planning_gw_id,
-                            n_gws=6,
-                            chip_schedule={},
-                            team_fixture_counts=team_fixture_counts,
-                        )
-                        baseline_total = sum(g.get("total_xpts", 0) for g in baseline_plan) if baseline_plan else 0
-                    except Exception:
-                        baseline_total = 0
-
-                    # Evaluate all combinations
-                    all_chip_results = []
-                    progress = st.progress(0, text="Evaluating chip strategies...")
-                    for idx, schedule in enumerate(chip_combos):
+                    with st.spinner("Running baseline plan and calculating chip values..."):
+                        # Step 1: Run baseline plan ONCE (no chips)
                         try:
-                            plan = build_rolling_plan(
+                            baseline_plan = build_rolling_plan(
                                 my_squad_chip, df,
                                 bank=team_data_chip["bank"],
                                 free_transfers=ft_chip,
@@ -4208,30 +4169,141 @@ def main():
                                 xpts_map=xpts_map,
                                 planning_gw_id=planning_gw_id,
                                 n_gws=6,
-                                chip_schedule=schedule,
+                                chip_schedule={},
                                 team_fixture_counts=team_fixture_counts,
                             )
-                            if plan:
-                                total = sum(g.get("total_xpts", 0) for g in plan)
-                                gw_totals = {g["gw"]: g.get("total_xpts", 0) for g in plan}
-                                all_chip_results.append({
-                                    "schedule": dict(schedule),
-                                    "total": total,
-                                    "gw_totals": gw_totals,
-                                })
+                            baseline_gw = {g["gw"]: g for g in baseline_plan} if baseline_plan else {}
+                            baseline_total = sum(g.get("total_xpts", 0) for g in baseline_plan) if baseline_plan else 0
                         except Exception:
-                            continue
-                        if (idx + 1) % 10 == 0 or idx == len(chip_combos) - 1:
-                            progress.progress((idx + 1) / len(chip_combos),
-                                              text=f"Evaluating... {idx + 1}/{len(chip_combos)}")
-                    progress.empty()
+                            baseline_plan = None
+                            baseline_gw = {}
+                            baseline_total = 0
 
-                    all_chip_results.sort(key=lambda x: x["total"], reverse=True)
+                        # Step 2: Pre-compute chip gain for each GW analytically
+                        # This is FAST — no planner calls needed
+                        chip_gains = {}  # {gw: {chip_key: gain}}
+
+                        for gw in plan_gws:
+                            chip_gains[gw] = {}
+                            gw_data = baseline_gw.get(gw, {})
+                            xi = gw_data.get("xi")
+                            bench = gw_data.get("bench")
+                            captain = gw_data.get("captain")
+                            is_dgw = gw in dgw_gws
+                            is_bgw = gw in blank_gws
+                            dgw_mult = 1.7 if is_dgw else 1.0
+
+                            # TRIPLE CAPTAIN gain = captain's xPts × 1 (extra double)
+                            cap_xpts = 0
+                            if captain is not None:
+                                cap_id = captain.get("id", 0) if isinstance(captain, dict) else getattr(captain, "id", 0)
+                                cap_xpts = xpts_map.get(cap_id, {}).get(gw, 0)
+                            tc_gain = cap_xpts * dgw_mult  # DGW captains score ~1.7x
+                            chip_gains[gw]["3xc"] = round(tc_gain, 1)
+
+                            # BENCH BOOST gain = sum of bench xPts
+                            bb_gain = 0
+                            if bench is not None and len(bench) > 0:
+                                bb_gain = bench["id"].map(
+                                    lambda pid: xpts_map.get(pid, {}).get(gw, 0)
+                                ).sum()
+                            bb_gain *= dgw_mult  # DGW bench players score ~1.7x
+                            chip_gains[gw]["bboost"] = round(bb_gain, 1)
+
+                            # FREE HIT gain = best possible squad - current squad xPts
+                            current_gw_xpts = 0
+                            if xi is not None and len(xi) > 0:
+                                current_gw_xpts = xi["id"].map(
+                                    lambda pid: xpts_map.get(pid, {}).get(gw, 0)
+                                ).sum()
+                            # Best possible XI: top players by xPts this GW
+                            all_gw = [(p["id"], xpts_map.get(p["id"], {}).get(gw, 0))
+                                      for _, p in qualified.iterrows()]
+                            all_gw.sort(key=lambda x: x[1], reverse=True)
+                            best_xi_xpts = sum(x[1] for x in all_gw[:11]) if len(all_gw) >= 11 else 0
+                            fh_gain = max(best_xi_xpts - current_gw_xpts, 0)
+                            if is_bgw:
+                                fh_gain *= 1.5  # FH is extra valuable on BGWs
+                            chip_gains[gw]["freehit"] = round(fh_gain, 1)
+
+                            # WILDCARD gain: run WC plan once to measure improvement
+                            # Only compute for the top 2 candidate GWs to save time
+                            chip_gains[gw]["wildcard"] = 0
+
+                        # Run WC for the 2 most promising GWs (before DGWs or highest xPts weeks)
+                        wc_candidate_gws = sorted(plan_gws,
+                            key=lambda g: (1 if g + 1 in dgw_gws or g + 2 in dgw_gws else 0,
+                                           sum(xpts_map.get(p["id"], {}).get(g, 0)
+                                               for _, p in qualified.nlargest(15, "xpts_total").iterrows())),
+                            reverse=True)[:2]
+
+                        for wc_gw in wc_candidate_gws:
+                            try:
+                                wc_plan = build_rolling_plan(
+                                    my_squad_chip, df,
+                                    bank=team_data_chip["bank"],
+                                    free_transfers=ft_chip,
+                                    purchase_prices=team_data_chip.get("purchase_prices", {}),
+                                    selling_prices_api=team_data_chip.get("selling_prices_api", {}),
+                                    xpts_map=xpts_map,
+                                    planning_gw_id=planning_gw_id,
+                                    n_gws=6,
+                                    chip_schedule={wc_gw: "wildcard"},
+                                    team_fixture_counts=team_fixture_counts,
+                                )
+                                if wc_plan:
+                                    wc_total = sum(g.get("total_xpts", 0) for g in wc_plan)
+                                    chip_gains[wc_gw]["wildcard"] = round(max(wc_total - baseline_total, 0), 1)
+                            except Exception:
+                                pass
+
+                        # Step 3: Build all valid chip assignments using pre-computed gains
+                        # This is instant — just arithmetic
+                        from itertools import combinations, permutations
+
+                        all_chip_results = []
+                        # No chips baseline
+                        all_chip_results.append({
+                            "schedule": {},
+                            "total": baseline_total,
+                            "gw_totals": {g["gw"]: g.get("total_xpts", 0) for g in baseline_plan} if baseline_plan else {},
+                        })
+
+                        for n_chips in range(1, len(available_chips) + 1):
+                            for chip_subset in combinations(available_chips, n_chips):
+                                for gw_perm in permutations(plan_gws, n_chips):
+                                    schedule = {}
+                                    total_gain = 0
+                                    gw_totals = {}
+                                    valid = True
+                                    for c, g in zip(chip_subset, gw_perm):
+                                        planner_name = chip_name_map.get(c, c)
+                                        schedule[g] = planner_name
+                                        gain = chip_gains.get(g, {}).get(c, 0)
+                                        total_gain += gain
+
+                                    # Build approximate gw_totals
+                                    for gw in plan_gws:
+                                        base = baseline_gw.get(gw, {}).get("total_xpts", 0)
+                                        chip_on = schedule.get(gw)
+                                        if chip_on:
+                                            rev = {v: k for k, v in chip_name_map.items()}
+                                            ck = rev.get(chip_on, chip_on)
+                                            base += chip_gains.get(gw, {}).get(ck, 0)
+                                        gw_totals[gw] = round(base, 1)
+
+                                    all_chip_results.append({
+                                        "schedule": schedule,
+                                        "total": round(baseline_total + total_gain, 1),
+                                        "gw_totals": gw_totals,
+                                    })
+
+                        all_chip_results.sort(key=lambda x: x["total"], reverse=True)
 
                     # Store results in session state so they persist
                     st.session_state["chip_results"] = all_chip_results
                     st.session_state["chip_baseline"] = baseline_total
-                    st.session_state["chip_combos_count"] = len(chip_combos)
+                    st.session_state["chip_combos_count"] = len(all_chip_results)
 
                 # Display results (from session state if available)
                 if "chip_results" in st.session_state and st.session_state["chip_results"]:
