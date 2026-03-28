@@ -4034,9 +4034,121 @@ def main():
                 my_squad_chip = df[df["id"].isin(team_data_chip["squad_ids"])].copy()
                 ft_chip = team_data_chip.get("free_transfers", 1)
 
+                # User-defined expected DGWs and BGWs
+                st.markdown("**📅 Expected Double & Blank Gameweeks**")
+                st.caption("The FPL fixture feed often doesn't show DGWs/BGWs until they're confirmed. "
+                            "Use community intel (Ben Crellin, FPL Scout) to flag expected DGWs and BGWs. "
+                            "The chip strategy will weight these weeks heavily for TC/BB/FH.")
+
+                remaining_gws = list(range(planning_gw_id, 39))
+                dgw_col, bgw_col = st.columns(2)
+                with dgw_col:
+                    expected_dgws = st.multiselect(
+                        "🔥 Expected DGW weeks",
+                        options=remaining_gws,
+                        default=[gw for gw in [33, 36] if gw in remaining_gws],
+                        help="GWs where you expect teams to have double fixtures",
+                        key="exp_dgws",
+                    )
+                with bgw_col:
+                    expected_bgws = st.multiselect(
+                        "⚠️ Expected BGW weeks",
+                        options=remaining_gws,
+                        default=[gw for gw in [34, 37] if gw in remaining_gws],
+                        help="GWs where you expect teams to blank",
+                        key="exp_bgws",
+                    )
+
+                st.markdown("")
+
                 if st.button("🚀 Find Optimal Chip Strategy", use_container_width=True, type="primary"):
                     from itertools import combinations, permutations
                     from collections import Counter
+
+                    # === FIXTURE ANALYSIS — show DGWs/blanks ===
+                    st.markdown("### 📅 Fixture Analysis")
+                    events_all = bootstrap.get("events", [])
+                    future_all = [e for e in events_all if e.get("id", 0) >= planning_gw_id and e.get("id", 0) <= 38]
+
+                    dgw_gws = []
+                    blank_gws = []
+                    for gw_ev in sorted(future_all, key=lambda x: x["id"]):
+                        gw_id_a = gw_ev["id"]
+                        gw_fix = [f for f in fixtures_list if f.get("event") == gw_id_a]
+                        tc = Counter()
+                        teams_playing = set()
+                        for f in gw_fix:
+                            tc[f["team_h"]] += 1
+                            tc[f["team_a"]] += 1
+                            teams_playing.add(f["team_h"])
+                            teams_playing.add(f["team_a"])
+                        n_dgw = sum(1 for t, c in tc.items() if c >= 2)
+                        n_blank = 20 - len(teams_playing)
+                        n_matches = len(gw_fix)
+
+                        # Combine API-detected and user-flagged DGWs/BGWs
+                        is_dgw = n_dgw > 0 or gw_id_a in expected_dgws
+                        is_bgw = n_blank > 0 or gw_id_a in expected_bgws
+
+                        marker = ""
+                        if is_dgw and n_dgw > 0:
+                            marker = f"🔥 DGW (confirmed — {n_dgw} teams)"
+                            dgw_gws.append(gw_id_a)
+                        elif is_dgw:
+                            marker = f"🔥 DGW (expected — user flagged)"
+                            dgw_gws.append(gw_id_a)
+                        elif is_bgw and n_blank > 0:
+                            marker = f"⚠️ BGW (confirmed — {n_blank} teams blanking)"
+                            blank_gws.append(gw_id_a)
+                        elif is_bgw:
+                            marker = f"⚠️ BGW (expected — user flagged)"
+                            blank_gws.append(gw_id_a)
+                        else:
+                            marker = f"📋 Standard"
+
+                        # Best captain xPts for this GW
+                        best_cap = 0
+                        for _, p in qualified.head(50).iterrows():
+                            gx = xpts_map.get(p["id"], {}).get(gw_id_a, 0)
+                            if gx > best_cap:
+                                best_cap = gx
+
+                        # If user-flagged DGW, estimate boosted captain xPts (×1.7 for DGW)
+                        cap_display = best_cap
+                        if is_dgw and n_dgw == 0:
+                            cap_display = best_cap * 1.7  # rough DGW uplift
+
+                        st.markdown(
+                            f'<span style="color:#8892a8;font-size:0.8rem;">'
+                            f'GW{gw_id_a}: {n_matches} matches · {marker} · '
+                            f'Best captain: {cap_display:.1f} xPts'
+                            f'{"*" if is_dgw and n_dgw == 0 else ""}</span>',
+                            unsafe_allow_html=True,
+                        )
+
+                    if not dgw_gws and not blank_gws:
+                        st.markdown(
+                            '<div style="background:#1a1e2e;border-radius:8px;padding:0.8rem;margin:0.5rem 0;">'
+                            '<span style="color:#fbbf24;font-weight:600;">⚠️ No DGWs or BGWs detected or flagged.</span><br>'
+                            '<span style="color:#8892a8;font-size:0.8rem;">'
+                            'Use the inputs above to flag expected DGW/BGW weeks based on cup results '
+                            'and community intel. This significantly affects chip recommendations.</span></div>',
+                            unsafe_allow_html=True,
+                        )
+                    elif dgw_gws or blank_gws:
+                        dgw_str = f"DGWs: GW{', GW'.join(str(g) for g in dgw_gws)}" if dgw_gws else ""
+                        bgw_str = f"BGWs: GW{', GW'.join(str(g) for g in blank_gws)}" if blank_gws else ""
+                        st.markdown(
+                            f'<div style="background:#1a2e1a;border-radius:8px;padding:0.8rem;margin:0.5rem 0;">'
+                            f'<span style="color:#34d399;font-weight:600;">✅ Key weeks identified: '
+                            f'{dgw_str}{" · " if dgw_str and bgw_str else ""}{bgw_str}</span><br>'
+                            f'<span style="color:#8892a8;font-size:0.8rem;">'
+                            f'TC/BB are best on DGW weeks. FH is best on BGW weeks. '
+                            f'WC is best 1-2 GWs before a DGW to load up on DGW players.</span></div>',
+                            unsafe_allow_html=True,
+                        )
+
+                    st.markdown("---")
 
                     available_chips = [k for k, v in chips_rem_chip.items() if v > 0]
                     chip_name_map = {
@@ -4101,7 +4213,12 @@ def main():
                             )
                             if plan:
                                 total = sum(g.get("total_xpts", 0) for g in plan)
-                                all_chip_results.append({"schedule": dict(schedule), "total": total})
+                                gw_totals = {g["gw"]: g.get("total_xpts", 0) for g in plan}
+                                all_chip_results.append({
+                                    "schedule": dict(schedule),
+                                    "total": total,
+                                    "gw_totals": gw_totals,
+                                })
                         except Exception:
                             continue
                         if (idx + 1) % 10 == 0 or idx == len(chip_combos) - 1:
@@ -4111,16 +4228,35 @@ def main():
 
                     all_chip_results.sort(key=lambda x: x["total"], reverse=True)
 
-                    # Display results
+                    # Store results in session state so they persist
+                    st.session_state["chip_results"] = all_chip_results
+                    st.session_state["chip_baseline"] = baseline_total
+                    st.session_state["chip_combos_count"] = len(chip_combos)
+
+                # Display results (from session state if available)
+                if "chip_results" in st.session_state and st.session_state["chip_results"]:
+                    all_chip_results = st.session_state["chip_results"]
+                    baseline_total = st.session_state.get("chip_baseline", 0)
+                    combos_count = st.session_state.get("chip_combos_count", 0)
+
                     st.markdown("### Results")
                     st.markdown(
-                        f'<span style="color:#8892a8;">Evaluated <b>{len(chip_combos)}</b> combinations · '
+                        f'<span style="color:#8892a8;">Evaluated <b>{combos_count}</b> combinations · '
                         f'Baseline (no chips): <b>{baseline_total:.1f}</b> xPts</span>',
                         unsafe_allow_html=True,
                     )
                     st.markdown("")
 
+                    chip_name_map = {
+                        "wildcard": "wildcard", "freehit": "free_hit",
+                        "3xc": "triple_captain", "bboost": "bench_boost",
+                    }
                     reverse_map = {v: k for k, v in chip_name_map.items()}
+                    # Reverse map for setting session state keys
+                    planner_key_map = {
+                        "wildcard": "wc_gw", "free_hit": "fh_gw",
+                        "triple_captain": "tc_gw", "bench_boost": "bb_gw",
+                    }
                     top_results = all_chip_results[:5]
 
                     for rank, result in enumerate(top_results):
@@ -4144,14 +4280,63 @@ def main():
                         bg = "#111827" if is_best else "#0d1117"
                         rank_label = "⭐ BEST" if is_best else f"#{rank + 1}"
 
-                        st.markdown(
-                            f'<div style="background:{bg};border-left:3px solid {border_col};padding:0.7rem 0.8rem;margin:0.4rem 0;border-radius:0 6px 6px 0;">'
-                            f'<span style="color:{"#f02d6e" if is_best else "#5a6580"};font-weight:700;font-size:0.8rem;">{rank_label}</span> '
-                            f'<span style="color:#e2e8f0;font-weight:700;font-size:1.1rem;">{total:.1f} xPts</span> '
-                            f'<span style="color:#34d399;font-size:0.85rem;">(+{gain:.1f} vs no chips)</span><br>'
-                            f'<span style="color:#8892a8;font-size:0.8rem;">{strategy_str}</span></div>',
-                            unsafe_allow_html=True,
-                        )
+                        col_info, col_btn = st.columns([5, 1])
+                        with col_info:
+                            st.markdown(
+                                f'<div style="background:{bg};border-left:3px solid {border_col};padding:0.7rem 0.8rem;border-radius:0 6px 6px 0;">'
+                                f'<span style="color:{"#f02d6e" if is_best else "#5a6580"};font-weight:700;font-size:0.8rem;">{rank_label}</span> '
+                                f'<span style="color:#e2e8f0;font-weight:700;font-size:1.1rem;">{total:.1f} xPts</span> '
+                                f'<span style="color:#34d399;font-size:0.85rem;">(+{gain:.1f})</span><br>'
+                                f'<span style="color:#8892a8;font-size:0.8rem;">{strategy_str}</span></div>',
+                                unsafe_allow_html=True,
+                            )
+                        with col_btn:
+                            if schedule and st.button("✅ Apply", key=f"apply_chip_{rank}", use_container_width=True):
+                                # Set the chip selectbox values in session state
+                                # First reset all
+                                for sk in ["wc_gw", "fh_gw", "tc_gw", "bb_gw"]:
+                                    st.session_state[sk] = "None"
+                                # Then set the ones from this strategy
+                                for gw, chip_name in schedule.items():
+                                    key = planner_key_map.get(chip_name)
+                                    if key:
+                                        st.session_state[key] = gw
+                                st.success(f"Applied! Go to 🏠 My Team tab → Generate 6-Gameweek Plan to run it.")
+
+                    # Per-GW breakdown: compare BEST vs BASELINE
+                    if len(all_chip_results) >= 1:
+                        st.markdown("")
+                        st.markdown("### Per-GW Breakdown (Best Strategy vs No Chips)")
+                        best_result = all_chip_results[0]
+                        best_gw_totals = best_result.get("gw_totals", {})
+
+                        # Find baseline result (empty schedule)
+                        baseline_result = next((r for r in all_chip_results if not r["schedule"]), None)
+                        baseline_gw_totals = baseline_result.get("gw_totals", {}) if baseline_result else {}
+
+                        reverse_map_display = {v: k for k, v in chip_name_map.items()}
+                        for gw in sorted(best_gw_totals.keys()):
+                            best_pts = best_gw_totals.get(gw, 0)
+                            base_pts = baseline_gw_totals.get(gw, 0)
+                            diff = best_pts - base_pts
+
+                            chip_on = best_result["schedule"].get(gw)
+                            if chip_on:
+                                chip_key = reverse_map_display.get(chip_on, chip_on)
+                                chip_str = f" — {chip_labels_chip.get(chip_key, chip_on)}"
+                                diff_color = "#34d399" if diff > 0.5 else "#fbbf24" if diff > 0 else "#8892a8"
+                            else:
+                                chip_str = ""
+                                diff_color = "#8892a8"
+
+                            st.markdown(
+                                f'<span style="color:#8892a8;font-size:0.8rem;">'
+                                f'GW{gw}: <b style="color:#e2e8f0;">{best_pts:.1f}</b> xPts '
+                                f'(baseline: {base_pts:.1f}, '
+                                f'<span style="color:{diff_color};">{"+" if diff >= 0 else ""}{diff:.1f}</span>)'
+                                f'<span style="color:#f02d6e;font-weight:600;">{chip_str}</span></span>',
+                                unsafe_allow_html=True,
+                            )
 
     # === Footer ===
     st.markdown("---")
