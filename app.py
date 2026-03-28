@@ -931,8 +931,10 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
                 team_atk_str_odds = team_attack_odds.get("attack_strength", 1.0)
 
                 if elo_by_fpl:
-                    opp_def_str = (opp_def_str_odds * 0.5) + ((1.0 / max(opp_elo_str, 0.5)) * 0.5)
-                    team_atk_str = (team_atk_str_odds * 0.5) + (team_elo_str * 0.5)
+                    # Elo adds a dynamic signal but shouldn't dominate
+                    # 70% odds-based (fixture-specific), 30% Elo (form-adjusted)
+                    opp_def_str = (opp_def_str_odds * 0.7) + ((1.0 / max(opp_elo_str, 0.5)) * 0.3)
+                    team_atk_str = (team_atk_str_odds * 0.7) + (team_elo_str * 0.3)
                 else:
                     opp_def_str = opp_def_str_odds
                     team_atk_str = team_atk_str_odds
@@ -941,11 +943,10 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
                 cs_prob_from_live = None
 
             # Scale factor: blend opponent weakness with team strength
-            # Dampened to prevent runaway inflation for strong teams vs weak opponents
-            # Average case should be ~1.0 (league average vs league average)
-            raw_scale = (opp_def_str * 0.4 + team_atk_str * 0.2 + 0.4)
-            # Soft cap: compress extreme values towards 1.0
-            scale = 1.0 + (raw_scale - 1.0) * 0.7  # 70% of the deviation from 1.0
+            # Target: ~0.80 for hard fixtures (vs top 4 away), ~1.20 for easy (vs bottom 3 home)
+            # This gives a ~40% swing which matches real FPL points variance by fixture
+            raw_scale = (opp_def_str * 0.55 + team_atk_str * 0.25 + 0.20)
+            scale = raw_scale  # no dampening — let fixtures matter
             home_boost = 1.08 if fix["home"] else 0.96
 
             adj_xg = xg_per90 * scale * home_boost
