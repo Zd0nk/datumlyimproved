@@ -2351,6 +2351,20 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
         # Cap at FTs + 2 hits max (so worst case is -8, never -12 or more)
         remaining_ft = max(current_ft - transfers_ft_used, 0)
         max_transfers = min(remaining_ft + 2, 7)
+
+        # === VALUE OF ROLLING A FREE TRANSFER ===
+        # Banking a FT gives you flexibility next week.
+        # Estimated value of an extra FT = ~1.5-2.5 xPts (the average gain from
+        # the best available transfer next week). This means we should only
+        # USE a free transfer if the gain exceeds this threshold.
+        # The value diminishes as we approach max FTs (5) since we'd waste the roll.
+        if current_ft >= 5:
+            roll_value = 0.0  # already at max, must use or lose
+        elif current_ft >= 3:
+            roll_value = 1.0  # already have good flexibility, lower bar
+        else:
+            roll_value = 1.5  # banking from 1→2 or 2→3 is very valuable
+
         for t_num in range(max_transfers):
             transfer = find_best_single_transfer_for_gw(
                 current_squad, transfer_pool, current_bank,
@@ -2364,22 +2378,22 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
 
             # Is this a free transfer or a hit?
             is_free = (t_num < current_ft)
-            hit_number = t_num - current_ft + 1 if not is_free else 0  # 1st hit, 2nd hit, etc.
+            hit_number = t_num - current_ft + 1 if not is_free else 0
 
-            # Decision thresholds:
-            # Free transfers: make if ANY positive gain (it's free!)
-            # Hits: escalating threshold — each additional hit needs MORE justification
-            #   1st hit (-4): needs horizon gain > 6.0 (50% safety margin on the 4pt cost)
-            #   2nd hit (-8 cumulative): needs horizon gain > 8.0
-            #   3rd hit (-12 cumulative): needs horizon gain > 10.0 (very rarely worth it)
-            # This accounts for model uncertainty and diminishing returns
             if is_free:
-                if transfer["xpts_gain"] < 0.05:
-                    break  # negligible gain
+                # Only use the FT if the gain exceeds the value of rolling
+                # First FT: compare against roll_value
+                # Second+ FT: lower threshold (we've already decided to use at least one)
+                if t_num == 0:
+                    if transfer["xpts_gain"] < roll_value:
+                        break  # better to roll the FT
+                else:
+                    if transfer["xpts_gain"] < 0.3:
+                        break  # marginal gain, stop
             else:
-                hit_threshold = 4.0 + (hit_number * 2.0)  # 6.0, 8.0, 10.0, 12.0...
+                hit_threshold = 4.0 + (hit_number * 2.0)
                 if transfer["xpts_gain"] < hit_threshold:
-                    break  # not enough gain to justify this hit
+                    break
                 total_hit += 4
 
             # Apply transfer
