@@ -2240,8 +2240,11 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
             if xi is not None and len(xi) > 0:
                 fh_total = xi["id"].map(lambda pid: xpts_map.get(pid, {}).get(gw, 0)).sum()
                 cap = gw_entry.get("captain")
+                cap_mult = gw_entry.get("captain_multiplier", 2)
                 if cap is not None:
-                    fh_total += xpts_map.get(cap.get("id", 0) if isinstance(cap, dict) else getattr(cap, "id", 0), {}).get(gw, 0)
+                    cap_id = cap.get("id", 0) if isinstance(cap, dict) else getattr(cap, "id", 0)
+                    cap_pts = xpts_map.get(cap_id, {}).get(gw, 0)
+                    fh_total += cap_pts * (cap_mult - 1)  # only the EXTRA bonus
             gw_entry["total_xpts"] = round(fh_total, 1)
             current_ft = min(current_ft + 1, 5)
             plan.append(gw_entry)
@@ -2275,8 +2278,11 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
             if xi is not None and len(xi) > 0:
                 wc_total = xi["id"].map(lambda pid: xpts_map.get(pid, {}).get(gw, 0)).sum()
                 cap = gw_entry.get("captain")
+                cap_mult = gw_entry.get("captain_multiplier", 2)
                 if cap is not None:
-                    wc_total += xpts_map.get(cap.get("id", 0) if isinstance(cap, dict) else getattr(cap, "id", 0), {}).get(gw, 0)
+                    cap_id = cap.get("id", 0) if isinstance(cap, dict) else getattr(cap, "id", 0)
+                    cap_pts = xpts_map.get(cap_id, {}).get(gw, 0)
+                    wc_total += cap_pts * (cap_mult - 1)  # only the EXTRA bonus
             gw_entry["total_xpts"] = round(wc_total, 1)
             plan.append(gw_entry)
             continue
@@ -2441,7 +2447,8 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
             cap = gw_entry.get("captain")
             cap_mult = gw_entry.get("captain_multiplier", 2)
             if cap is not None:
-                cap_pts = xpts_map.get(cap.get("id", 0) if isinstance(cap, dict) else cap.get("id", 0), {}).get(gw, 0)
+                cap_id = cap.get("id", 0) if isinstance(cap, dict) else getattr(cap, "id", 0)
+                cap_pts = xpts_map.get(cap_id, {}).get(gw, 0)
                 gw_total += cap_pts * (cap_mult - 1)
             # Bench boost
             if gw_entry.get("bench_boost") and bench is not None and len(bench) > 0:
