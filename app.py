@@ -2799,8 +2799,60 @@ def main():
 
                     st.markdown("")
 
-                    # Step 3: Generate plan
-                    st.markdown("**Step 3: Generate your optimal plan**")
+                    # Step 3: Expected blanks & doubles
+                    st.markdown("**Step 3: Expected blank & double gameweeks**")
+                    st.caption("Flag teams you expect to blank in specific GWs (e.g. FA Cup clashes). "
+                                "Their players will be projected at 0 xPts for that GW.")
+
+                    # Build team list
+                    all_team_shorts = sorted(df["team"].unique().tolist())
+
+                    blank_overrides = {}  # {gw: set of team_short_names}
+                    gw_options_plan = [planning_gw_id + i for i in range(6)]
+
+                    # Show compact inputs for each GW
+                    blank_cols = st.columns(3)
+                    for idx_b, gw_b in enumerate(gw_options_plan):
+                        with blank_cols[idx_b % 3]:
+                            blanking = st.multiselect(
+                                f"GW{gw_b} blanks",
+                                options=all_team_shorts,
+                                placeholder="Teams blanking...",
+                                key=f"blank_gw_{gw_b}",
+                            )
+                            if blanking:
+                                blank_overrides[gw_b] = set(blanking)
+
+                    # Build modified xpts_map that zeros out blanking teams
+                    if blank_overrides:
+                        xpts_map_adjusted = {}
+                        # Get team_short for each player
+                        player_teams = dict(zip(df["id"], df["team"]))
+                        for pid, gw_dict in xpts_map.items():
+                            player_team = player_teams.get(pid, "")
+                            adjusted = {}
+                            for gw, xpts_val in gw_dict.items():
+                                blanking_teams = blank_overrides.get(gw, set())
+                                if player_team in blanking_teams:
+                                    adjusted[gw] = 0.0  # player's team is blanking
+                                else:
+                                    adjusted[gw] = xpts_val
+                            xpts_map_adjusted[pid] = adjusted
+                    else:
+                        xpts_map_adjusted = xpts_map
+
+                    # Show summary of overrides
+                    if blank_overrides:
+                        override_parts = []
+                        for gw_o in sorted(blank_overrides.keys()):
+                            teams_str = ", ".join(sorted(blank_overrides[gw_o]))
+                            override_parts.append(f"GW{gw_o}: {teams_str}")
+                        st.info(f"Blank overrides: {' · '.join(override_parts)}")
+
+                    st.markdown("")
+
+                    # Step 4: Generate plan
+                    st.markdown("**Step 4: Generate your optimal plan**")
                     generate = st.button("🚀 Generate 6-Gameweek Plan", use_container_width=True, type="primary")
 
                     if generate or st.session_state.get("plan_generated"):
@@ -2813,7 +2865,7 @@ def main():
                                 free_transfers=ft_available,
                                 purchase_prices=team_data.get("purchase_prices", {}),
                                 selling_prices_api=team_data.get("selling_prices_api", {}),
-                                xpts_map=xpts_map,
+                                xpts_map=xpts_map_adjusted,
                                 planning_gw_id=planning_gw_id,
                                 n_gws=6,
                                 chip_schedule=chip_schedule,
