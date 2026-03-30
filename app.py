@@ -36,7 +36,7 @@ warnings.filterwarnings("ignore")
 # PAGE CONFIG
 # ============================================================
 st.set_page_config(
-    page_title="Datumly — FPL Intelligence",
+    page_title="Datumly - FPL Intelligence",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="collapsed",
