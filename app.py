@@ -2802,43 +2802,144 @@ def main():
                     # Step 3: Expected blanks & doubles
                     st.markdown("**Step 3: Expected blank & double gameweeks**")
 
-                    # === AUTO-DETECT FIXTURES OWED ===
-                    # Count fixtures per team across the full season
-                    # Teams with < 38 fixtures have postponed matches that will become DGWs
+                    # === MISSING FIXTURE DETECTOR ===
+                    # Every team plays every other team twice (home & away) = 38 matches
+                    # Build the full expected fixture list and find what's missing
+
+                    team_id_to_short = {t_id: t.get("short_name", "?") for t_id, t in teams.items()}
+                    all_team_ids = sorted(teams.keys())
+
+                    # Build set of all assigned fixtures: (home_id, away_id)
+                    assigned_fixtures = set()
                     team_fixture_total = {}
-                    team_fixture_per_gw = {}  # {team_id: {gw: count}}
-                    for t_id in teams:
+                    team_fixture_per_gw = {}
+                    fixture_gw_map = {}  # (home_id, away_id) -> gw
+
+                    for t_id in all_team_ids:
                         team_fixture_total[t_id] = 0
                         team_fixture_per_gw[t_id] = {}
+
                     for f in fixtures_list:
                         ev = f.get("event")
+                        h, a = f["team_h"], f["team_a"]
                         if ev:
-                            for t_id in [f["team_h"], f["team_a"]]:
+                            assigned_fixtures.add((h, a))
+                            fixture_gw_map[(h, a)] = ev
+                            for t_id in [h, a]:
                                 team_fixture_total[t_id] = team_fixture_total.get(t_id, 0) + 1
                                 if t_id not in team_fixture_per_gw:
                                     team_fixture_per_gw[t_id] = {}
                                 team_fixture_per_gw[t_id][ev] = team_fixture_per_gw[t_id].get(ev, 0) + 1
+                        else:
+                            # Fixture exists but has no GW assigned = postponed
+                            assigned_fixtures.add((h, a))
 
+                    # Find missing fixtures (not even in the API as unassigned)
+                    # Each pair should have exactly 2 fixtures: (A,B) and (B,A)
+                    missing_fixtures = []
+                    for i, t1 in enumerate(all_team_ids):
+                        for t2 in all_team_ids:
+                            if t1 == t2:
+                                continue
+                            if (t1, t2) not in assigned_fixtures:
+                                t1_short = team_id_to_short.get(t1, "?")
+                                t2_short = team_id_to_short.get(t2, "?")
+                                missing_fixtures.append({
+                                    "home": t1_short, "away": t2_short,
+                                    "home_id": t1, "away_id": t2,
+                                })
+
+                    # Also find fixtures with event=None (postponed but in the API)
+                    postponed = []
+                    for f in fixtures_list:
+                        if f.get("event") is None:
+                            h_short = team_id_to_short.get(f["team_h"], "?")
+                            a_short = team_id_to_short.get(f["team_a"], "?")
+                            postponed.append({"home": h_short, "away": a_short})
+
+                    # Fixtures owed per team
                     fixtures_owed = {}
                     for t_id, count in team_fixture_total.items():
                         owed = 38 - count
                         if owed > 0:
-                            t_short = teams.get(t_id, {}).get("short_name", "?")
-                            fixtures_owed[t_short] = owed
+                            fixtures_owed[team_id_to_short.get(t_id, "?")] = owed
 
-                    if fixtures_owed:
-                        owed_str = ", ".join([f"{t} ({n} owed)" for t, n in sorted(fixtures_owed.items(), key=lambda x: -x[1])])
+                    # === FREE MIDWEEK FINDER ===
+                    # Look at GW dates to find gaps where midweek fixtures could slot in
+                    events_all = bootstrap.get("events", [])
+                    gw_deadlines = {}
+                    for ev in events_all:
+                        if ev.get("id") and ev.get("deadline_time"):
+                            try:
+                                from datetime import datetime
+                                dt = datetime.fromisoformat(ev["deadline_time"].replace("Z", "+00:00"))
+                                gw_deadlines[ev["id"]] = dt
+                            except Exception:
+                                pass
+
+                    free_midweeks = []
+                    for gw_num in range(planning_gw_id, 38):
+                        dt_this = gw_deadlines.get(gw_num)
+                        dt_next = gw_deadlines.get(gw_num + 1)
+                        if dt_this and dt_next:
+                            gap_days = (dt_next - dt_this).days
+                            # A gap of 7+ days between GW deadlines means there's a free midweek
+                            if gap_days >= 7:
+                                midweek_date = dt_this + __import__('datetime').timedelta(days=3)
+                                free_midweeks.append({
+                                    "after_gw": gw_num,
+                                    "gap_days": gap_days,
+                                    "likely_dgw": gw_num + 1,  # postponed match goes into next GW
+                                    "midweek_approx": midweek_date.strftime("%d %b"),
+                                })
+
+                    # === DISPLAY ===
+                    if missing_fixtures or postponed or fixtures_owed:
                         st.markdown(
-                            f'<div style="background:#1a2e1a;border-radius:8px;padding:0.7rem;margin-bottom:0.5rem;">'
-                            f'<span style="color:#34d399;font-weight:600;">🔍 Auto-detected fixtures owed (likely DGWs):</span><br>'
-                            f'<span style="color:#8892a8;font-size:0.8rem;">{owed_str}</span><br>'
-                            f'<span style="color:#5a6580;font-size:0.72rem;">These teams have postponed matches that must be '
-                            f'rescheduled — creating DGWs. Use this info to flag DGW teams below.</span></div>',
+                            '<div style="background:#1a2e1a;border-radius:8px;padding:0.8rem;margin-bottom:0.5rem;">',
                             unsafe_allow_html=True,
                         )
+
+                        if fixtures_owed:
+                            owed_str = ", ".join([f"**{t}** ({n})" for t, n in sorted(fixtures_owed.items(), key=lambda x: -x[1])])
+                            st.markdown(
+                                f'<span style="color:#34d399;font-weight:600;">📊 Fixtures owed:</span> '
+                                f'<span style="color:#8892a8;font-size:0.82rem;">{owed_str}</span>',
+                                unsafe_allow_html=True,
+                            )
+
+                        if missing_fixtures or postponed:
+                            all_unscheduled = postponed + missing_fixtures
+                            match_strs = [f"{m['home']} vs {m['away']}" for m in all_unscheduled[:10]]
+                            st.markdown(
+                                f'<span style="color:#34d399;font-weight:600;">⚽ Unscheduled matches:</span> '
+                                f'<span style="color:#8892a8;font-size:0.82rem;">{" · ".join(match_strs)}'
+                                f'{"..." if len(all_unscheduled) > 10 else ""}</span>',
+                                unsafe_allow_html=True,
+                            )
+
+                        if free_midweeks:
+                            mw_strs = [f"After GW{m['after_gw']} ({m['gap_days']}d gap → likely DGW in GW{m['likely_dgw']}, ~{m['midweek_approx']})"
+                                       for m in free_midweeks]
+                            st.markdown(
+                                f'<span style="color:#34d399;font-weight:600;">📅 Free midweeks:</span> '
+                                f'<span style="color:#8892a8;font-size:0.82rem;">{"<br>".join(mw_strs)}</span>',
+                                unsafe_allow_html=True,
+                            )
+
+                        # Suggest likely DGW mapping
+                        if fixtures_owed and free_midweeks:
+                            st.markdown(
+                                '<span style="color:#fbbf24;font-weight:600;font-size:0.82rem;">'
+                                '💡 Suggestion: Unscheduled matches will likely be placed in GWs with free midweeks. '
+                                'Flag those teams as doubling in the inputs below.</span>',
+                                unsafe_allow_html=True,
+                            )
+
+                        st.markdown('</div>', unsafe_allow_html=True)
                     else:
                         st.markdown(
-                            '<span style="color:#5a6580;font-size:0.8rem;">No fixtures owed detected — all teams have 38 fixtures assigned.</span>',
+                            '<span style="color:#5a6580;font-size:0.8rem;">No missing fixtures detected — all 380 matches are assigned.</span>',
                             unsafe_allow_html=True,
                         )
 
