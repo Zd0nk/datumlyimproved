@@ -2801,53 +2801,109 @@ def main():
 
                     # Step 3: Expected blanks & doubles
                     st.markdown("**Step 3: Expected blank & double gameweeks**")
-                    st.caption("Flag teams you expect to blank in specific GWs (e.g. FA Cup clashes). "
-                                "Their players will be projected at 0 xPts for that GW.")
+
+                    # === AUTO-DETECT FIXTURES OWED ===
+                    # Count fixtures per team across the full season
+                    # Teams with < 38 fixtures have postponed matches that will become DGWs
+                    team_fixture_total = {}
+                    team_fixture_per_gw = {}  # {team_id: {gw: count}}
+                    for t_id in teams:
+                        team_fixture_total[t_id] = 0
+                        team_fixture_per_gw[t_id] = {}
+                    for f in fixtures_list:
+                        ev = f.get("event")
+                        if ev:
+                            for t_id in [f["team_h"], f["team_a"]]:
+                                team_fixture_total[t_id] = team_fixture_total.get(t_id, 0) + 1
+                                if t_id not in team_fixture_per_gw:
+                                    team_fixture_per_gw[t_id] = {}
+                                team_fixture_per_gw[t_id][ev] = team_fixture_per_gw[t_id].get(ev, 0) + 1
+
+                    fixtures_owed = {}
+                    for t_id, count in team_fixture_total.items():
+                        owed = 38 - count
+                        if owed > 0:
+                            t_short = teams.get(t_id, {}).get("short_name", "?")
+                            fixtures_owed[t_short] = owed
+
+                    if fixtures_owed:
+                        owed_str = ", ".join([f"{t} ({n} owed)" for t, n in sorted(fixtures_owed.items(), key=lambda x: -x[1])])
+                        st.markdown(
+                            f'<div style="background:#1a2e1a;border-radius:8px;padding:0.7rem;margin-bottom:0.5rem;">'
+                            f'<span style="color:#34d399;font-weight:600;">🔍 Auto-detected fixtures owed (likely DGWs):</span><br>'
+                            f'<span style="color:#8892a8;font-size:0.8rem;">{owed_str}</span><br>'
+                            f'<span style="color:#5a6580;font-size:0.72rem;">These teams have postponed matches that must be '
+                            f'rescheduled — creating DGWs. Use this info to flag DGW teams below.</span></div>',
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.markdown(
+                            '<span style="color:#5a6580;font-size:0.8rem;">No fixtures owed detected — all teams have 38 fixtures assigned.</span>',
+                            unsafe_allow_html=True,
+                        )
+
+                    st.caption("Flag teams blanking in specific GWs. For expected DGWs, flag the teams "
+                                "that will double — their xPts will be boosted ×1.7 for that GW.")
 
                     # Build team list
                     all_team_shorts = sorted(df["team"].unique().tolist())
 
                     blank_overrides = {}  # {gw: set of team_short_names}
+                    dgw_overrides = {}    # {gw: set of team_short_names}
                     gw_options_plan = [planning_gw_id + i for i in range(6)]
 
-                    # Show compact inputs for each GW
-                    blank_cols = st.columns(3)
-                    for idx_b, gw_b in enumerate(gw_options_plan):
-                        with blank_cols[idx_b % 3]:
+                    # Show compact inputs for blanks AND doubles per GW
+                    for gw_b in gw_options_plan:
+                        bcol, dcol = st.columns(2)
+                        with bcol:
                             blanking = st.multiselect(
-                                f"GW{gw_b} blanks",
+                                f"⚠️ GW{gw_b} blanks",
                                 options=all_team_shorts,
                                 placeholder="Teams blanking...",
                                 key=f"blank_gw_{gw_b}",
                             )
                             if blanking:
                                 blank_overrides[gw_b] = set(blanking)
+                        with dcol:
+                            doubling = st.multiselect(
+                                f"🔥 GW{gw_b} doubles",
+                                options=all_team_shorts,
+                                placeholder="Teams doubling...",
+                                key=f"dgw_gw_{gw_b}",
+                            )
+                            if doubling:
+                                dgw_overrides[gw_b] = set(doubling)
 
-                    # Build modified xpts_map that zeros out blanking teams
-                    if blank_overrides:
-                        xpts_map_adjusted = {}
-                        # Get team_short for each player
-                        player_teams = dict(zip(df["id"], df["team"]))
-                        for pid, gw_dict in xpts_map.items():
-                            player_team = player_teams.get(pid, "")
-                            adjusted = {}
-                            for gw, xpts_val in gw_dict.items():
-                                blanking_teams = blank_overrides.get(gw, set())
-                                if player_team in blanking_teams:
-                                    adjusted[gw] = 0.0  # player's team is blanking
-                                else:
-                                    adjusted[gw] = xpts_val
-                            xpts_map_adjusted[pid] = adjusted
-                    else:
-                        xpts_map_adjusted = xpts_map
+                    # Build modified xpts_map that zeros blanks and boosts doubles
+                    DGW_BOOST = 1.7  # DGW players get ~1.7x xPts (two fixtures)
+                    xpts_map_adjusted = {}
+                    player_teams = dict(zip(df["id"], df["team"]))
+                    for pid, gw_dict in xpts_map.items():
+                        player_team = player_teams.get(pid, "")
+                        adjusted = {}
+                        for gw, xpts_val in gw_dict.items():
+                            blanking_teams = blank_overrides.get(gw, set())
+                            doubling_teams = dgw_overrides.get(gw, set())
+                            if player_team in blanking_teams:
+                                adjusted[gw] = 0.0
+                            elif player_team in doubling_teams:
+                                adjusted[gw] = round(xpts_val * DGW_BOOST, 2)
+                            else:
+                                adjusted[gw] = xpts_val
+                        xpts_map_adjusted[pid] = adjusted
 
                     # Show summary of overrides
+                    override_parts = []
                     if blank_overrides:
-                        override_parts = []
                         for gw_o in sorted(blank_overrides.keys()):
                             teams_str = ", ".join(sorted(blank_overrides[gw_o]))
-                            override_parts.append(f"GW{gw_o}: {teams_str}")
-                        st.info(f"Blank overrides: {' · '.join(override_parts)}")
+                            override_parts.append(f"GW{gw_o} blank: {teams_str}")
+                    if dgw_overrides:
+                        for gw_o in sorted(dgw_overrides.keys()):
+                            teams_str = ", ".join(sorted(dgw_overrides[gw_o]))
+                            override_parts.append(f"GW{gw_o} DGW: {teams_str}")
+                    if override_parts:
+                        st.info(" · ".join(override_parts))
 
                     st.markdown("")
 
