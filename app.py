@@ -27,7 +27,7 @@ from pulp import (
     LpProblem, LpMaximize, LpVariable, lpSum, LpStatus, value,
     PULP_CBC_CMD,
 )
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import StringIO
 import warnings
 warnings.filterwarnings("ignore")
@@ -2871,7 +2871,6 @@ def main():
                     for ev in events_all:
                         if ev.get("id") and ev.get("deadline_time"):
                             try:
-                                from datetime import datetime
                                 dt = datetime.fromisoformat(ev["deadline_time"].replace("Z", "+00:00"))
                                 gw_deadlines[ev["id"]] = dt
                             except Exception:
@@ -2885,7 +2884,7 @@ def main():
                             gap_days = (dt_next - dt_this).days
                             # A gap of 7+ days between GW deadlines means there's a free midweek
                             if gap_days >= 7:
-                                midweek_date = dt_this + __import__('datetime').timedelta(days=3)
+                                midweek_date = dt_this + timedelta(days=3)
                                 free_midweeks.append({
                                     "after_gw": gw_num,
                                     "gap_days": gap_days,
