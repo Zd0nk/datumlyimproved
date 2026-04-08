@@ -1543,6 +1543,15 @@ def fetch_manager_team(manager_id, current_gw_id):
             started_event = entry.get("started_event", 1)
 
             ft = 1  # everyone gets 1 at start
+
+            # Build set of GWs where chips were played
+            chips_played_gws = {}  # {gw: chip_name}
+            for c in history.get("chips", []):
+                c_event = c.get("event")
+                c_name = c.get("name", "")
+                if c_event:
+                    chips_played_gws[c_event] = c_name
+
             for gw_data in current_hist:
                 gw_number = gw_data.get("event", 0)
                 transfers_made = gw_data.get("event_transfers", 0)
@@ -1550,6 +1559,18 @@ def fetch_manager_team(manager_id, current_gw_id):
 
                 # Skip the GW the team was created — no FT banking on first GW
                 if gw_number <= started_event:
+                    ft = 1
+                    continue
+
+                chip_this_gw = chips_played_gws.get(gw_number, "")
+
+                # Free Hit: FTs are frozen — you don't gain or lose any
+                # You come out of FH with the same FTs you had going in
+                if chip_this_gw == "freehit":
+                    continue  # skip entirely, FTs unchanged
+
+                # Wildcard: unlimited transfers, FTs reset to 1 afterwards
+                if chip_this_gw == "wildcard":
                     ft = 1
                     continue
 
@@ -1607,7 +1628,12 @@ def fetch_manager_team(manager_id, current_gw_id):
             purchase_prices[t["element_in"]] = t["element_in_cost"]
 
         # 4. Current picks
+        # Important: if the current/most recent GW was a Free Hit, the picks endpoint
+        # returns the FH squad, not the real squad. We need to detect this and
+        # fall back to the GW before the FH to get the actual squad.
         picks_data = None
+        active_chip = None
+
         for gw in [current_gw_id, current_gw_id - 1]:
             if gw < 1:
                 continue
@@ -1617,10 +1643,39 @@ def fetch_manager_team(manager_id, current_gw_id):
                     headers=headers, timeout=15,
                 )
                 if resp.status_code == 200:
-                    picks_data = resp.json()
-                    break
+                    pd_temp = resp.json()
+                    chip_active = pd_temp.get("active_chip")
+
+                    if chip_active == "freehit":
+                        # This GW was a Free Hit — skip it and use the previous GW's squad
+                        # (which is the real squad that reverts after FH)
+                        active_chip = "freehit"
+                        continue
+                    else:
+                        picks_data = pd_temp
+                        if active_chip != "freehit":
+                            active_chip = chip_active
+                        break
             except Exception:
                 continue
+
+        # If both GWs were FH (shouldn't happen) or no data, try going further back
+        if picks_data is None:
+            for gw in range(current_gw_id - 2, max(0, current_gw_id - 5), -1):
+                if gw < 1:
+                    continue
+                try:
+                    resp = requests.get(
+                        f"{FPL_BASE}/entry/{manager_id}/event/{gw}/picks/",
+                        headers=headers, timeout=15,
+                    )
+                    if resp.status_code == 200:
+                        pd_temp = resp.json()
+                        if pd_temp.get("active_chip") != "freehit":
+                            picks_data = pd_temp
+                            break
+                except Exception:
+                    continue
 
         if picks_data is None:
             return None, "Could not fetch team picks"
@@ -2734,37 +2789,33 @@ def main():
                     gw_options = [planning_gw_id + i for i in range(6)]
 
                     # Check if a chip strategy was applied from the Chip Strategy tab
-                    applied = st.session_state.get("applied_chip_schedule", {})
-                    # Reverse map: {gw: planner_chip_name} → per-chip defaults
-                    reverse_chip = {}
-                    for gw_a, cname in applied.items():
-                        reverse_chip[cname] = gw_a
-
-                    def _chip_default(chip_name, options):
-                        """Get default index for a chip selectbox from applied strategy."""
-                        gw_val = reverse_chip.get(chip_name)
-                        if gw_val and gw_val in options:
-                            return options.index(gw_val) + 1  # +1 because "None" is index 0
-                        return 0  # "None"
+                    applied = st.session_state.pop("applied_chip_schedule", None)
+                    if applied:
+                        # Build reverse map: planner_chip_name → gw
+                        planner_to_key = {
+                            "wildcard": "wc_gw", "free_hit": "fh_gw",
+                            "triple_captain": "tc_gw", "bench_boost": "bb_gw",
+                        }
+                        # Reset all chip keys first
+                        for sk in ["wc_gw", "fh_gw", "tc_gw", "bb_gw"]:
+                            if sk in st.session_state:
+                                del st.session_state[sk]
+                        # Set the applied chips
+                        for gw_a, cname in applied.items():
+                            key = planner_to_key.get(cname)
+                            if key:
+                                st.session_state[key] = gw_a
+                        st.success("✅ Chip strategy applied from the 🎯 Chip Strategy tab!")
 
                     chip_cols = st.columns(4)
                     with chip_cols[0]:
-                        wc_gw = st.selectbox("🃏 Wildcard", ["None"] + gw_options, key="wc_gw",
-                                             index=_chip_default("wildcard", gw_options))
+                        wc_gw = st.selectbox("🃏 Wildcard", ["None"] + gw_options, key="wc_gw")
                     with chip_cols[1]:
-                        fh_gw = st.selectbox("⚡ Free Hit", ["None"] + gw_options, key="fh_gw",
-                                             index=_chip_default("free_hit", gw_options))
+                        fh_gw = st.selectbox("⚡ Free Hit", ["None"] + gw_options, key="fh_gw")
                     with chip_cols[2]:
-                        tc_gw = st.selectbox("👑 Triple Captain", ["None"] + gw_options, key="tc_gw",
-                                             index=_chip_default("triple_captain", gw_options))
+                        tc_gw = st.selectbox("👑 Triple Captain", ["None"] + gw_options, key="tc_gw")
                     with chip_cols[3]:
-                        bb_gw = st.selectbox("💪 Bench Boost", ["None"] + gw_options, key="bb_gw",
-                                             index=_chip_default("bench_boost", gw_options))
-
-                    # Clear applied schedule after it's been consumed
-                    if applied:
-                        st.session_state.pop("applied_chip_schedule", None)
-                        st.success("✅ Chip strategy applied from the 🎯 Chip Strategy tab!")
+                        bb_gw = st.selectbox("💪 Bench Boost", ["None"] + gw_options, key="bb_gw")
 
                     chip_schedule = {}
                     if wc_gw != "None":
