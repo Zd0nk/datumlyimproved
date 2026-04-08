@@ -2212,9 +2212,24 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
         gw = planning_gw_id + i
         chip = chip_schedule.get(gw, None)
 
+        # Restore squad after free hit (must happen before any other logic)
+        if pre_fh_squad is not None:
+            current_squad = pre_fh_squad
+            pre_fh_squad = None
+
         has_fixtures = any(xpts_map.get(pid, {}).get(gw, 0) > 0 for pid in current_squad["id"])
-        if not has_fixtures:
-            break
+        if not has_fixtures and chip != "free_hit":
+            # No fixtures for current squad this GW — but don't break the whole plan
+            # Just record an empty GW and continue (the next GW might have fixtures)
+            gw_entry = {
+                "gw": gw, "chip": chip, "transfer": None, "hit": 0,
+                "squad": current_squad.copy(), "xi": None, "bench": None,
+                "captain": None, "captain_multiplier": 2, "bench_boost": False,
+                "total_xpts": 0, "transfers": [], "ft_used": 0,
+            }
+            current_ft = min(current_ft + 1, 5)  # still gain an FT
+            plan.append(gw_entry)
+            continue
 
         gw_entry = {
             "gw": gw, "chip": chip, "transfer": None, "hit": 0,
@@ -2250,11 +2265,6 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
             current_ft = min(current_ft + 1, 5)
             plan.append(gw_entry)
             continue
-
-        # Restore after free hit
-        if pre_fh_squad is not None:
-            current_squad = pre_fh_squad
-            pre_fh_squad = None
 
         # === WILDCARD ===
         if chip == "wildcard":
