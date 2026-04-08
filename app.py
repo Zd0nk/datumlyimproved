@@ -3045,6 +3045,11 @@ def main():
                     st.markdown("**Step 4: Generate your optimal plan**")
                     generate = st.button("🚀 Generate 6-Gameweek Plan", use_container_width=True, type="primary")
 
+                    # Auto-run if triggered from Chip Strategy tab's Apply button
+                    auto_run = st.session_state.pop("plan_auto_run", False)
+                    if auto_run:
+                        generate = True
+
                     if generate or st.session_state.get("plan_generated"):
                         st.session_state["plan_generated"] = True
 
@@ -3305,7 +3310,7 @@ def main():
                                 for row_idx, gw_e in enumerate(plan, 2):
                                     gw = gw_e["gw"]
                                     chip = gw_e.get("chip", "—") or "—"
-                                    transfers_list = gw_e.get("transfers", [])
+                                    transfers_list = gw_e.get("transfers") or []
                                     hit = gw_e.get("hit", 0)
                                     ft_used = gw_e.get("ft_used", 0)
                                     xi_data = gw_e.get("xi")
@@ -3313,11 +3318,20 @@ def main():
                                     captain = gw_e.get("captain")
                                     cap_mult = gw_e.get("captain_multiplier", 2)
 
-                                    formation = get_formation_str(xi_data) if xi_data is not None else "?"
+                                    formation = get_formation_str(xi_data) if xi_data is not None and len(xi_data) >= 11 else "?"
                                     xi_xpts = xi_data["xpts_gw"].sum() if xi_data is not None and "xpts_gw" in xi_data.columns else 0
                                     bench_xpts = bench_data["xpts_gw"].sum() if bench_data is not None and "xpts_gw" in bench_data.columns else 0
-                                    cap_name = captain.get("name", "?") if captain else "?"
-                                    cap_xpts = xpts_map.get(captain.get("id", 0), {}).get(gw, 0) * cap_mult if captain else 0
+
+                                    # Safe captain extraction (could be pandas Series or dict or None)
+                                    cap_name = "?"
+                                    cap_xpts = 0
+                                    if captain is not None:
+                                        try:
+                                            cap_id = captain["id"] if hasattr(captain, "__getitem__") else 0
+                                            cap_name = captain["name"] if hasattr(captain, "__getitem__") else "?"
+                                            cap_xpts = xpts_map_adjusted.get(cap_id, {}).get(gw, 0) * cap_mult
+                                        except Exception:
+                                            pass
 
                                     ws_summary.cell(row=row_idx, column=1, value=f"GW{gw}").font = default_font
                                     ws_summary.cell(row=row_idx, column=2, value=chip).font = default_font
@@ -3385,9 +3399,14 @@ def main():
                                     gw = gw_e["gw"]
                                     xi_data = gw_e.get("xi")
                                     captain = gw_e.get("captain")
-                                    cap_id = captain.get("id") if captain else None
+                                    cap_id = None
+                                    if captain is not None:
+                                        try:
+                                            cap_id = captain["id"] if hasattr(captain, "__getitem__") else None
+                                        except Exception:
+                                            pass
 
-                                    if xi_data is not None:
+                                    if xi_data is not None and len(xi_data) > 0:
                                         for _, p in xi_data.sort_values("pos_id").iterrows():
                                             is_cap = p["id"] == cap_id
                                             ws_xi.cell(row=xi_row, column=1, value=f"GW{gw}").font = default_font
@@ -4605,10 +4624,10 @@ def main():
                                 unsafe_allow_html=True,
                             )
                         with col_btn:
-                            if schedule and st.button("✅ Apply", key=f"apply_chip_{rank}", use_container_width=True):
-                                # Store applied strategy in a separate key
-                                # The selectboxes will read from this on next rerun
+                            if schedule and st.button("✅ Apply & Run", key=f"apply_chip_{rank}", use_container_width=True):
+                                # Store applied strategy and flag to auto-run the planner
                                 st.session_state["applied_chip_schedule"] = dict(schedule)
+                                st.session_state["plan_auto_run"] = True
                                 st.rerun()
 
                     # Per-GW breakdown: compare BEST vs BASELINE
