@@ -2722,15 +2722,39 @@ def main():
                     # Step 1: Chip selection
                     st.markdown("**Step 1: Set your chip schedule**")
                     gw_options = [planning_gw_id + i for i in range(6)]
+
+                    # Check if a chip strategy was applied from the Chip Strategy tab
+                    applied = st.session_state.get("applied_chip_schedule", {})
+                    # Reverse map: {gw: planner_chip_name} → per-chip defaults
+                    reverse_chip = {}
+                    for gw_a, cname in applied.items():
+                        reverse_chip[cname] = gw_a
+
+                    def _chip_default(chip_name, options):
+                        """Get default index for a chip selectbox from applied strategy."""
+                        gw_val = reverse_chip.get(chip_name)
+                        if gw_val and gw_val in options:
+                            return options.index(gw_val) + 1  # +1 because "None" is index 0
+                        return 0  # "None"
+
                     chip_cols = st.columns(4)
                     with chip_cols[0]:
-                        wc_gw = st.selectbox("🃏 Wildcard", ["None"] + gw_options, key="wc_gw")
+                        wc_gw = st.selectbox("🃏 Wildcard", ["None"] + gw_options, key="wc_gw",
+                                             index=_chip_default("wildcard", gw_options))
                     with chip_cols[1]:
-                        fh_gw = st.selectbox("⚡ Free Hit", ["None"] + gw_options, key="fh_gw")
+                        fh_gw = st.selectbox("⚡ Free Hit", ["None"] + gw_options, key="fh_gw",
+                                             index=_chip_default("free_hit", gw_options))
                     with chip_cols[2]:
-                        tc_gw = st.selectbox("👑 Triple Captain", ["None"] + gw_options, key="tc_gw")
+                        tc_gw = st.selectbox("👑 Triple Captain", ["None"] + gw_options, key="tc_gw",
+                                             index=_chip_default("triple_captain", gw_options))
                     with chip_cols[3]:
-                        bb_gw = st.selectbox("💪 Bench Boost", ["None"] + gw_options, key="bb_gw")
+                        bb_gw = st.selectbox("💪 Bench Boost", ["None"] + gw_options, key="bb_gw",
+                                             index=_chip_default("bench_boost", gw_options))
+
+                    # Clear applied schedule after it's been consumed
+                    if applied:
+                        st.session_state.pop("applied_chip_schedule", None)
+                        st.success("✅ Chip strategy applied from the 🎯 Chip Strategy tab!")
 
                     chip_schedule = {}
                     if wc_gw != "None":
@@ -4572,16 +4596,10 @@ def main():
                             )
                         with col_btn:
                             if schedule and st.button("✅ Apply", key=f"apply_chip_{rank}", use_container_width=True):
-                                # Set the chip selectbox values in session state
-                                # First reset all
-                                for sk in ["wc_gw", "fh_gw", "tc_gw", "bb_gw"]:
-                                    st.session_state[sk] = "None"
-                                # Then set the ones from this strategy
-                                for gw, chip_name in schedule.items():
-                                    key = planner_key_map.get(chip_name)
-                                    if key:
-                                        st.session_state[key] = gw
-                                st.success(f"Applied! Go to 🏠 My Team tab → Generate 6-Gameweek Plan to run it.")
+                                # Store applied strategy in a separate key
+                                # The selectboxes will read from this on next rerun
+                                st.session_state["applied_chip_schedule"] = dict(schedule)
+                                st.rerun()
 
                     # Per-GW breakdown: compare BEST vs BASELINE
                     if len(all_chip_results) >= 1:
