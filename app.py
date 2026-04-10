@@ -656,14 +656,22 @@ TEAM_NAME_MAP = {
     "Arsenal": "ARS", "Aston Villa": "AVL", "Bournemouth": "BOU",
     "Brentford": "BRE", "Brighton": "BHA", "Chelsea": "CHE",
     "Crystal Palace": "CRY", "Everton": "EVE", "Fulham": "FUL",
-    "Ipswich": "IPS", "Leicester": "LEI", "Liverpool": "LIV",
-    "Man City": "MCI", "Man United": "MUN", "Newcastle": "NEW",
-    "Nott'm Forest": "NFO", "Southampton": "SOU", "Spurs": "TOT",
-    "West Ham": "WHU", "Wolves": "WOL",
+    "Ipswich": "IPS", "Ipswich Town": "IPS", "Leicester": "LEI", "Leicester City": "LEI",
+    "Liverpool": "LIV",
+    "Man City": "MCI", "Manchester City": "MCI",
+    "Man United": "MUN", "Manchester Utd": "MUN", "Manchester United": "MUN",
+    "Newcastle": "NEW", "Newcastle Utd": "NEW",
+    "Nott'm Forest": "NFO", "Nottingham Forest": "NFO", "Nott'ham Forest": "NFO",
+    "Southampton": "SOU",
+    "Spurs": "TOT", "Tottenham": "TOT", "Tottenham Hotspur": "TOT",
+    "West Ham": "WHU", "West Ham United": "WHU",
+    "Wolves": "WOL", "Wolverhampton": "WOL",
     # 2025-26 promoted teams (adjust as needed)
-    "Leeds": "LEE", "Burnley": "BUR", "Sunderland": "SUN",
-    "Sheffield Utd": "SHU", "Norwich": "NOR", "Middlesbrough": "MID",
-    "Luton": "LUT",
+    "Leeds": "LEE", "Leeds United": "LEE",
+    "Burnley": "BUR", "Sunderland": "SUN",
+    "Sheffield Utd": "SHU", "Sheffield United": "SHU",
+    "Norwich": "NOR", "Middlesbrough": "MID",
+    "Luton": "LUT", "Luton Town": "LUT",
 }
 
 
@@ -949,7 +957,26 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
             scale = raw_scale  # no dampening — let fixtures matter
             home_boost = 1.08 if fix["home"] else 0.96
 
-            adj_xg = xg_per90 * scale * home_boost
+            # Separate penalty xG from open-play xG before scaling
+            # Penalties are fixture-independent (~0.76 xG regardless of opponent)
+            # so they shouldn't be scaled by fixture difficulty
+            pen_xg_component = 0.0
+            if pen_order == 1 and nineties >= 3:
+                # Estimate pen xG/90: ~1 pen per 5-8 games × 0.76 xG per pen
+                # Use actual data: penalties_missed + goals from penalties ≈ total pens taken
+                pens_scored = float(p.get("penalties_scored", 0) or 0)  
+                pens_missed = float(p.get("penalties_missed", 0) or 0)
+                total_pens = pens_scored + pens_missed
+                if total_pens > 0 and nineties > 0:
+                    pen_xg_component = (total_pens * 0.76) / nineties  # per 90
+                else:
+                    pen_xg_component = 0.10  # fallback: ~1 pen per 7.5 games
+            elif pen_order == 2:
+                pen_xg_component = 0.03  # backup pen taker, rarely takes
+
+            open_play_xg = max(xg_per90 - pen_xg_component, 0)
+
+            adj_xg = open_play_xg * scale * home_boost + pen_xg_component  # pens unscaled
             adj_xa = xa_per90 * scale * home_boost
 
             # Clean sheet probability
