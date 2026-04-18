@@ -4080,7 +4080,42 @@ def main():
                 all_comparisons = []
                 gw_summaries = []
 
-                with st.spinner("Fetching actual points data for recent GWs..."):
+                with st.spinner("Building retroactive predictions for completed GWs..."):
+                    # Rebuild upcoming fixtures for PAST GWs
+                    backtest_gw_ids = [e["id"] for e in completed_gws]
+                    min_bt_gw = min(backtest_gw_ids)
+                    max_bt_gw = max(backtest_gw_ids)
+
+                    # Build opponent map for past GWs
+                    bt_upcoming = {}
+                    for t_id in teams:
+                        bt_upcoming[t_id] = []
+                    for f in fixtures_list:
+                        ev = f.get("event")
+                        if ev and min_bt_gw <= ev <= max_bt_gw:
+                            if f["team_h"] in bt_upcoming:
+                                bt_upcoming[f["team_h"]].append({
+                                    "gw": ev, "opp_id": f["team_a"], "home": True,
+                                    "difficulty": f.get("team_h_difficulty", 3)
+                                })
+                            if f["team_a"] in bt_upcoming:
+                                bt_upcoming[f["team_a"]].append({
+                                    "gw": ev, "opp_id": f["team_h"], "home": False,
+                                    "difficulty": f.get("team_a_difficulty", 3)
+                                })
+
+                    # Temporarily monkey-patch the upcoming map in the model
+                    # by calling build_xpts_model with a shifted current_gw_id
+                    bt_xpts_map, _ = build_xpts_model(
+                        df, team_odds, teams, fixtures_list, min_bt_gw,
+                        form_xg_data=None,
+                        team_fixture_counts=team_fixture_counts,
+                        elo_ratings=None,
+                        live_odds=None,
+                        rotation_data=None,
+                    )
+
+                with st.spinner("Fetching actual points data..."):
                     for gw_event in completed_gws:
                         gw_id = gw_event["id"]
                         try:
@@ -4097,12 +4132,11 @@ def main():
                             for el in elements:
                                 pid = el["id"]
                                 actual_pts = el.get("stats", {}).get("total_points", 0)
-                                predicted_pts = xpts_map.get(pid, {}).get(gw_id, None)
+                                predicted_pts = bt_xpts_map.get(pid, {}).get(gw_id, None)
 
                                 if predicted_pts is None or predicted_pts == 0:
                                     continue
 
-                                # Only compare players who actually played
                                 mins = el.get("stats", {}).get("minutes", 0)
                                 if mins == 0:
                                     continue
