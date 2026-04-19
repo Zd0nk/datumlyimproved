@@ -33,32 +33,137 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # ============================================================
-# PAGE CONFIG
+# LEAGUE CONFIGURATION SYSTEM
 # ============================================================
+# All league-specific settings are here. The rest of the app reads from
+# the active config, making it easy to add new leagues.
+
+LEAGUE_CONFIGS = {
+    "FPL": {
+        "name": "Fantasy Premier League",
+        "short_name": "FPL",
+        "country": "England",
+        "base_url": "https://fantasy.premierleague.com/api",
+        "football_data_url": "https://www.football-data.co.uk/mmz4281/2526/E0.csv",
+        "odds_api_league": "soccer_epl",
+        "n_teams": 20,
+        "season_gws": 38,
+        "half_season_gw": 19,  # chips refresh after this GW
+        "budget": 1000,  # 100.0m in 0.1m units
+        "currency": "£",
+        "currency_unit": "m",
+        "max_per_team": 3,
+        "squad_size": 15,
+        "pts_goal": {1: 10, 2: 6, 3: 5, 4: 4},
+        "pts_assist": 3,
+        "pts_cs": {1: 4, 2: 4, 3: 1, 4: 0},
+        "pts_appearance": 2,
+        "pts_bonus_avg": 0.35,
+        "transfer_cost": 4,
+        "max_banked_ft": 5,
+        "league_avg_goals": 1.35,
+        "chips": {
+            "wildcard": {"name": "Wildcard", "icon": "🃏", "per_half": True, "count": 1},
+            "free_hit": {"name": "Free Hit", "icon": "⚡", "per_half": True, "count": 1},
+            "triple_captain": {"name": "Triple Captain", "icon": "👑", "per_half": True, "count": 1},
+            "bench_boost": {"name": "Bench Boost", "icon": "💪", "per_half": True, "count": 1},
+        },
+        "chip_api_names": {
+            "wildcard": "wildcard", "freehit": "freehit",
+            "3xc": "triple_captain", "bboost": "bench_boost",
+        },
+        "has_defcon": True,
+        "page_title": "Datumly - FPL Intelligence",
+    },
+    "Allsvenskan": {
+        "name": "Allsvenskan Fantasy",
+        "short_name": "ASV",
+        "country": "Sweden",
+        "base_url": "https://fantasy.allsvenskan.se/api",
+        "football_data_url": None,  # TODO: find Swedish league odds source
+        "odds_api_league": "soccer_sweden_allsvenskan",
+        "n_teams": 16,
+        "season_gws": 30,
+        "half_season_gw": 15,
+        "budget": 1000,  # 100.0m kr in 0.1m units
+        "currency": "kr",
+        "currency_unit": "m",
+        "max_per_team": 3,
+        "squad_size": 15,
+        "pts_goal": {1: 6, 2: 6, 3: 5, 4: 5},
+        "pts_assist": 3,
+        "pts_cs": {1: 4, 2: 4, 3: 1, 4: 0},
+        "pts_appearance": 2,
+        "pts_bonus_avg": 0.35,
+        "transfer_cost": 4,
+        "max_banked_ft": 5,
+        "league_avg_goals": 1.25,  # Allsvenskan averages slightly fewer goals
+        "chips": {
+            "wildcard": {"name": "Wildcard", "icon": "🃏", "per_half": True, "count": 1},
+            "park_the_bus": {"name": "Park the Bus", "icon": "🚌", "per_half": False, "count": 1},
+            "dynamic_duo": {"name": "Dynamic Duo", "icon": "👥", "per_half": False, "count": 1},
+            "loan_rangers": {"name": "Loan Rangers", "icon": "🔄", "per_half": False, "count": 1},
+        },
+        "chip_api_names": {
+            "wildcard": "wildcard", "freehit": "loan_rangers",
+            "3xc": "dynamic_duo", "bboost": "park_the_bus",
+        },
+        "has_frikort": True,  # additional free card per half-season
+        "has_defcon": False,  # Allsvenskan doesn't have DefCon points
+        "page_title": "Datumly - Allsvenskan Intelligence",
+    },
+}
+
+# Default league (will be overridden by UI selection)
+ACTIVE_LEAGUE = "FPL"
 st.set_page_config(
-    page_title="Datumly - FPL Intelligence",
+    page_title="Datumly - Fantasy Intelligence",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
 
-FPL_BASE = "https://fantasy.premierleague.com/api"
-FOOTBALL_DATA_URL = "https://www.football-data.co.uk/mmz4281/2526/E0.csv"
+# League selector (persisted in session state)
+if "active_league" not in st.session_state:
+    st.session_state["active_league"] = "FPL"
+
+def get_league_config():
+    """Get the active league configuration."""
+    return LEAGUE_CONFIGS[st.session_state["active_league"]]
+
+def get_chip_labels(lc=None):
+    """Build chip display labels from league config."""
+    if lc is None:
+        lc = get_league_config()
+    return {k: f'{v["icon"]} {v["name"]}' for k, v in lc["chips"].items()}
+
+# Set active constants from league config
+LC = get_league_config()
+
+FPL_BASE = LC["base_url"]
+FOOTBALL_DATA_URL = LC.get("football_data_url")
 
 POS_MAP = {1: "GKP", 2: "DEF", 3: "MID", 4: "FWD"}
+POS_FULL = {1: "Goalkeeper", 2: "Defender", 3: "Midfielder", 4: "Forward"}
+
+# Scoring constants (from league config)
+PTS_GOAL = LC["pts_goal"]
+PTS_ASSIST = LC["pts_assist"]
+PTS_CS = LC["pts_cs"]
+PTS_APPEARANCE = LC["pts_appearance"]
+PTS_BONUS_AVG = LC["pts_bonus_avg"]
+
+# League-specific settings
+league_avg_goals = LC["league_avg_goals"]
 
 DATUMLY_LOGO_B64 = "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"
 POS_FULL = {1: "Goalkeeper", 2: "Defender", 3: "Midfielder", 4: "Forward"}
 
-# FPL points system constants
-PTS_GOAL = {1: 10, 2: 6, 3: 5, 4: 4}
-PTS_ASSIST = 3
-PTS_CS = {1: 4, 2: 4, 3: 1, 4: 0}
-PTS_APPEARANCE = 2  # 60+ mins
-PTS_BONUS_AVG = 0.35  # average bonus per appearance (PL-wide avg ~0.3-0.4)
+# Scoring constants already set from LC above
 
 # Team colours: FPL short name -> (primary, secondary, text_colour)
-TEAM_COLOURS = {
+# Separate dicts per league, selected based on active config
+TEAM_COLOURS_FPL = {
     "ARS": ("#EF0107", "#FFFFFF", "#FFFFFF"),  # Red, white
     "AVL": ("#670E36", "#95BFE5", "#FFFFFF"),  # Claret, sky blue
     "BOU": ("#DA291C", "#000000", "#FFFFFF"),  # Red, black
@@ -84,6 +189,28 @@ TEAM_COLOURS = {
     "SUN": ("#EB172B", "#FFFFFF", "#FFFFFF"),  # Red, white
     "SHU": ("#EE2737", "#FFFFFF", "#FFFFFF"),  # Red, white
 }
+
+TEAM_COLOURS_ASV = {
+    "AIK": ("#1A1A2E", "#FFD700", "#FFD700"),   # Black/gold
+    "HÄC": ("#1B3A5C", "#FFD700", "#FFFFFF"),   # Navy/gold — BK Häcken
+    "DEG": ("#FF0000", "#FFFFFF", "#FFFFFF"),    # Red/white — Degerfors IF
+    "DJU": ("#003DA5", "#E31837", "#FFFFFF"),    # Blue/red — Djurgårdens IF
+    "GAI": ("#006B3F", "#FFFFFF", "#FFFFFF"),    # Green/white — GAIS
+    "HAM": ("#006B3F", "#FFFFFF", "#FFFFFF"),    # Green/white — Hammarby IF
+    "ELF": ("#FFD700", "#000000", "#000000"),    # Yellow/black — IF Elfsborg
+    "IFG": ("#1B4E8F", "#FFFFFF", "#FFFFFF"),    # Blue/white — IFK Göteborg
+    "KAL": ("#E31837", "#FFFFFF", "#FFFFFF"),    # Red/white — Kalmar FF
+    "MFF": ("#87CEEB", "#FFFFFF", "#000000"),    # Sky blue/white — Malmö FF
+    "MJÄ": ("#FFD700", "#000000", "#000000"),    # Yellow/black — Mjällby AIF
+    "SIR": ("#003DA5", "#FFFFFF", "#FFFFFF"),    # Blue/white — IK Sirius
+    "VSK": ("#000000", "#FFFFFF", "#FFFFFF"),    # Black/white — Västerås SK
+    "ÖRG": ("#E31837", "#003DA5", "#FFFFFF"),    # Red/blue — Örgryte IS
+    "BPK": ("#E31837", "#000000", "#FFFFFF"),    # Red/black — IF Brommapojkarna
+    "HBK": ("#003DA5", "#FFFFFF", "#FFFFFF"),    # Blue/white — Halmstads BK
+}
+
+# Select active colour map based on league
+TEAM_COLOURS = TEAM_COLOURS_FPL if LC["short_name"] == "FPL" else TEAM_COLOURS_ASV
 
 # GK kit colours (separate — keepers wear different kits)
 GK_COLOURS = {
@@ -214,7 +341,9 @@ def load_fpl_data():
 
 @st.cache_data(ttl=7200)
 def load_betting_odds():
-    """Source 2: football-data.co.uk — match betting odds for PL 2025-26."""
+    """Source 2: football-data.co.uk — match betting odds."""
+    if FOOTBALL_DATA_URL is None:
+        return None, "No odds URL configured for this league"
     try:
         resp = requests.get(FOOTBALL_DATA_URL, timeout=20)
         if resp.status_code != 200:
@@ -248,7 +377,8 @@ def load_club_elo():
         return None, str(e)
 
 
-ELO_NAME_MAP = {
+# Elo and Odds API team maps — league-specific
+ELO_NAME_MAP_FPL = {
     "Arsenal": "ARS", "Aston Villa": "AVL", "Bournemouth": "BOU",
     "Brentford": "BRE", "Brighton": "BHA", "Chelsea": "CHE",
     "Crystal Palace": "CRY", "Everton": "EVE", "Fulham": "FUL",
@@ -261,9 +391,20 @@ ELO_NAME_MAP = {
     "Middlesbrough": "MID", "Luton": "LUT",
 }
 
+ELO_NAME_MAP_ASV = {
+    "AIK": "AIK", "Hacken": "HÄC", "Degerfors": "DEG",
+    "Djurgarden": "DJU", "GAIS": "GAI", "Hammarby": "HAM",
+    "Elfsborg": "ELF", "Goteborg": "IFG", "Kalmar": "KAL",
+    "Malmo": "MFF", "Mjallby": "MJÄ", "Sirius": "SIR",
+    "Vasteras": "VSK", "Orgryte": "ÖRG",
+    "Brommapojkarna": "BPK", "Halmstad": "HBK",
+}
+
+ELO_NAME_MAP = ELO_NAME_MAP_FPL if LC["short_name"] == "FPL" else ELO_NAME_MAP_ASV
+
 ODDS_API_KEY = "e6df27ee56e4f85f1b20b194e4ffd080"
 
-ODDS_API_TEAM_MAP = {
+ODDS_API_TEAM_MAP_FPL = {
     "Arsenal": "ARS", "Aston Villa": "AVL", "AFC Bournemouth": "BOU",
     "Brentford": "BRE", "Brighton and Hove Albion": "BHA", "Chelsea": "CHE",
     "Crystal Palace": "CRY", "Everton": "EVE", "Fulham": "FUL",
@@ -275,6 +416,23 @@ ODDS_API_TEAM_MAP = {
     "Sheffield United": "SHU",
 }
 
+ODDS_API_TEAM_MAP_ASV = {
+    "AIK": "AIK", "BK Hacken": "HÄC", "BK Häcken": "HÄC",
+    "Degerfors IF": "DEG", "Djurgardens IF": "DJU", "Djurgårdens IF": "DJU",
+    "GAIS": "GAI", "Hammarby": "HAM", "Hammarby IF": "HAM",
+    "IF Elfsborg": "ELF", "Elfsborg": "ELF",
+    "IFK Goteborg": "IFG", "IFK Göteborg": "IFG",
+    "Kalmar FF": "KAL", "Malmö FF": "MFF", "Malmo FF": "MFF",
+    "Mjallby AIF": "MJÄ", "Mjällby AIF": "MJÄ",
+    "IK Sirius": "SIR", "Sirius": "SIR",
+    "Vasteras SK": "VSK", "Västerås SK": "VSK",
+    "Orgryte IS": "ÖRG", "Örgryte IS": "ÖRG",
+    "IF Brommapojkarna": "BPK", "Brommapojkarna": "BPK",
+    "Halmstads BK": "HBK", "Halmstad": "HBK",
+}
+
+ODDS_API_TEAM_MAP = ODDS_API_TEAM_MAP_FPL if LC["short_name"] == "FPL" else ODDS_API_TEAM_MAP_ASV
+
 
 @st.cache_data(ttl=21600)
 def load_live_odds():
@@ -282,7 +440,8 @@ def load_live_odds():
     if not ODDS_API_KEY:
         return None, "No API key"
     try:
-        url = f"https://api.the-odds-api.com/v4/sports/soccer_epl/odds?apiKey={ODDS_API_KEY}&regions=uk&markets=h2h,totals&oddsFormat=decimal"
+        odds_league = LC.get("odds_api_league", "soccer_epl")
+        url = f"https://api.the-odds-api.com/v4/sports/{odds_league}/odds?apiKey={ODDS_API_KEY}&regions=uk&markets=h2h,totals&oddsFormat=decimal"
         resp = requests.get(url, timeout=20)
         if resp.status_code == 401: return None, "Invalid API key"
         if resp.status_code == 429: return None, "Rate limit exceeded"
@@ -652,7 +811,8 @@ def odds_to_probabilities(odds_df, teams_map):
 
 
 # Team name mapping: football-data names → FPL short names
-TEAM_NAME_MAP = {
+# For Allsvenskan, this is empty since we don't use football-data.co.uk
+TEAM_NAME_MAP_FPL = {
     "Arsenal": "ARS", "Aston Villa": "AVL", "Bournemouth": "BOU",
     "Brentford": "BRE", "Brighton": "BHA", "Chelsea": "CHE",
     "Crystal Palace": "CRY", "Everton": "EVE", "Fulham": "FUL",
@@ -673,6 +833,10 @@ TEAM_NAME_MAP = {
     "Norwich": "NOR", "Middlesbrough": "MID",
     "Luton": "LUT", "Luton Town": "LUT",
 }
+
+TEAM_NAME_MAP_ASV = {}  # No football-data.co.uk source for Allsvenskan
+
+TEAM_NAME_MAP = TEAM_NAME_MAP_FPL if LC["short_name"] == "FPL" else TEAM_NAME_MAP_ASV
 
 
 def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
@@ -726,8 +890,8 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
                     "difficulty": f.get("team_a_difficulty", 3)
                 })
 
-    # League average goals per game (approx)
-    league_avg_goals = 1.35
+    # League average goals per game (from config)
+    league_avg_goals = LC["league_avg_goals"]
 
     xpts_all = {}
     xpts_breakdown = {}  # {pid: {gw: {component: value}}}
@@ -1074,19 +1238,10 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
             # ============================================================
             # DEFENSIVE CONTRIBUTION (DefCon) POINTS
             # ============================================================
-            # 2025/26 rule — ALL outfield players can earn DefCon:
-            #   DEFs: +2 pts for 10+ CBIT (clearances, blocks, interceptions, tackles)
-            #   MIDs: +2 pts for 12+ CBIRT (CBIT + ball recoveries)
-            #   FWDs: +2 pts for 12+ CBIRT (CBIT + ball recoveries)
-            #   GKs: NOT eligible for DefCon
-            # Capped at +2 per match.
-            #
-            # Key insight: DefCon is fixture-DEPENDENT but inversely to CS.
-            # Facing a strong attacker = more defensive actions = higher DefCon chance
-            # but lower CS chance. This makes DefCon-heavy players (Senesi, Tarkowski,
-            # Caicedo, Rice) valuable across ALL fixture difficulties.
+            # Only applies to leagues with DefCon (e.g. FPL 2025/26)
+            defcon_xpts = 0
             defcon_per90 = float(p.get("defcon_per90", 0) or 0)
-            if defcon_per90 > 0 and pos in [2, 3, 4] and nineties >= 3:
+            if LC.get("has_defcon", False) and defcon_per90 > 0 and pos in [2, 3, 4] and nineties >= 3:
                 # defcon_per90 from FPL API = DC points earned per 90 (0-2 scale)
                 #
                 # Position-specific scaling:
@@ -1625,19 +1780,20 @@ def fetch_manager_team(manager_id, current_gw_id):
         # First half: GW1-19, Second half: GW20-38
         # So at any point, you have 0 or 1 of each chip remaining for the
         # CURRENT half-season.
-        current_half = 1 if current_gw_id <= 19 else 2
+        half_gw = LC.get("half_season_gw", 19)
+        current_half = 1 if current_gw_id <= half_gw else 2
 
         chips_remaining = {}
         for chip_name in ["wildcard", "freehit", "3xc", "bboost"]:
             # Check if this chip was played in the current half
             if current_half == 1:
                 used_this_half = any(
-                    c.get("name") == chip_name and c.get("event", 0) <= 19
+                    c.get("name") == chip_name and c.get("event", 0) <= half_gw
                     for c in chips_played
                 )
             else:
                 used_this_half = any(
-                    c.get("name") == chip_name and c.get("event", 0) >= 20
+                    c.get("name") == chip_name and c.get("event", 0) >= half_gw + 1
                     for c in chips_played
                 )
             chips_remaining[chip_name] = 0 if used_this_half else 1
@@ -2045,10 +2201,16 @@ def find_best_single_transfer_for_gw(squad_df, all_players_df, bank,
     return best
 
 
-def solve_free_hit_squad(all_players_df, xpts_map, gw_id, budget=1000, locked_ids=None):
-    """Free Hit: pick best possible 15-man squad for a single GW."""
+def solve_free_hit_squad(all_players_df, xpts_map, gw_id, budget=1000, locked_ids=None,
+                         max_per_team=3):
+    """Free Hit / Loan Rangers: pick best possible 15-man squad for a single GW.
+    
+    max_per_team: 3 for normal Free Hit, None/999 for Loan Rangers (no team limit).
+    """
     if locked_ids is None:
         locked_ids = set()
+    if max_per_team is None:
+        max_per_team = 999  # effectively unlimited
     eligible = all_players_df[
         (all_players_df["minutes"] > 45) &
         (all_players_df["status"].isin(["a", "d", ""]))
@@ -2058,8 +2220,6 @@ def solve_free_hit_squad(all_players_df, xpts_map, gw_id, budget=1000, locked_id
         locked_players = all_players_df[all_players_df["id"].isin(locked_ids)]
         eligible = pd.concat([eligible, locked_players]).drop_duplicates(subset="id")
     eligible["xpts_gw"] = eligible["id"].map(lambda pid: xpts_map.get(pid, {}).get(gw_id, 0))
-    # For Free Hit, only pick players who actually have a fixture this GW
-    # But keep locked players even if they blank
     has_fixture = eligible["xpts_gw"] > 0
     is_locked = eligible["id"].isin(locked_ids)
     eligible = eligible[has_fixture | is_locked].copy()
@@ -2084,8 +2244,7 @@ def solve_free_hit_squad(all_players_df, xpts_map, gw_id, budget=1000, locked_id
     for pos_id, cnt in [(1, 2), (2, 5), (3, 5), (4, 3)]:
         prob += lpSum(x[pid] for pid in pids if pv[pid_map[pid]] == pos_id) == cnt
     for tid in set(tv):
-        prob += lpSum(x[pid] for pid in pids if tv[pid_map[pid]] == tid) <= 3
-    # Locked players must be in squad
+        prob += lpSum(x[pid] for pid in pids if tv[pid_map[pid]] == tid) <= max_per_team
     for pid in pids:
         if pid in locked_ids:
             prob += x[pid] == 1
@@ -2265,6 +2424,19 @@ def find_best_captain(squad_df, xpts_map, gw_id):
     return sq.loc[sq["xpts_gw"].idxmax()]
 
 
+def find_best_vice_captain(squad_df, xpts_map, gw_id, captain_id=None):
+    """Find best vice captain (2nd highest xPts) for Dynamic Duo chip."""
+    if squad_df is None or len(squad_df) == 0:
+        return None
+    sq = squad_df.copy()
+    sq["xpts_gw"] = sq["id"].map(lambda pid: xpts_map.get(pid, {}).get(gw_id, 0))
+    if captain_id is not None:
+        sq = sq[sq["id"] != captain_id]
+    if len(sq) == 0:
+        return None
+    return sq.loc[sq["xpts_gw"].idxmax()]
+
+
 def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
                        purchase_prices, selling_prices_api, xpts_map,
                        planning_gw_id, n_gws=6, chip_schedule=None,
@@ -2333,7 +2505,6 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
             gw_entry["xi"] = xi
             gw_entry["bench"] = bench
             gw_entry["captain"] = find_best_captain(xi, xpts_map, gw) if xi is not None else None
-            # Calculate total xPts
             fh_total = 0
             if xi is not None and len(xi) > 0:
                 fh_total = xi["id"].map(lambda pid: xpts_map.get(pid, {}).get(gw, 0)).sum()
@@ -2342,9 +2513,116 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
                 if cap is not None:
                     cap_id = cap.get("id", 0) if isinstance(cap, dict) else getattr(cap, "id", 0)
                     cap_pts = xpts_map.get(cap_id, {}).get(gw, 0)
-                    fh_total += cap_pts * (cap_mult - 1)  # only the EXTRA bonus
+                    fh_total += cap_pts * (cap_mult - 1)
             gw_entry["total_xpts"] = round(fh_total, 1)
             current_ft = min(current_ft + 1, 5)
+            plan.append(gw_entry)
+            continue
+
+        # === LOAN RANGERS (Allsvenskan — Free Hit with no team limit) ===
+        if chip == "loan_rangers":
+            pre_fh_squad = current_squad.copy()
+            total_val = int(current_bank + current_squad["now_cost"].sum())
+            lr_pool = all_players_df[~all_players_df["id"].isin(banned_ids)] if banned_ids else all_players_df
+            lr_squad = solve_free_hit_squad(lr_pool, xpts_map, gw, total_val,
+                                           locked_ids=locked_ids, max_per_team=None)
+            if lr_squad is not None:
+                gw_entry["squad"] = lr_squad
+                xi, bench = solve_best_xi_for_gw(lr_squad, xpts_map, gw)
+            else:
+                xi, bench = solve_best_xi_for_gw(current_squad, xpts_map, gw)
+            gw_entry["xi"] = xi
+            gw_entry["bench"] = bench
+            gw_entry["captain"] = find_best_captain(xi, xpts_map, gw) if xi is not None else None
+            lr_total = 0
+            if xi is not None and len(xi) > 0:
+                lr_total = xi["id"].map(lambda pid: xpts_map.get(pid, {}).get(gw, 0)).sum()
+                cap = gw_entry.get("captain")
+                if cap is not None:
+                    cap_id = cap.get("id", 0) if isinstance(cap, dict) else getattr(cap, "id", 0)
+                    lr_total += xpts_map.get(cap_id, {}).get(gw, 0)  # captain ×2 → +1 extra
+            gw_entry["total_xpts"] = round(lr_total, 1)
+            current_ft = min(current_ft + 1, 5)
+            plan.append(gw_entry)
+            continue
+
+        # === PARK THE BUS (Allsvenskan — double DEF points, no captain) ===
+        if chip == "park_the_bus":
+            xi, bench = solve_best_xi_for_gw(current_squad, xpts_map, gw)
+            gw_entry["xi"] = xi
+            gw_entry["bench"] = bench
+            gw_entry["captain"] = None  # no captain with Park the Bus
+            gw_entry["park_the_bus"] = True
+            ptb_total = 0
+            if xi is not None and len(xi) > 0:
+                for _, p in xi.iterrows():
+                    p_xpts = xpts_map.get(p["id"], {}).get(gw, 0)
+                    if p["pos_id"] == 2:  # DEF
+                        p_xpts *= 2  # double defender points
+                    ptb_total += p_xpts
+                # No captain bonus with Park the Bus
+            gw_entry["total_xpts"] = round(ptb_total, 1)
+            gw_entry["squad"] = current_squad.copy()
+            plan.append(gw_entry)
+            continue
+
+        # === DYNAMIC DUO (Allsvenskan — captain ×3, vice captain ×2) ===
+        if chip == "dynamic_duo":
+            xi, bench = solve_best_xi_for_gw(current_squad, xpts_map, gw)
+            gw_entry["xi"] = xi
+            gw_entry["bench"] = bench
+            cap = find_best_captain(xi, xpts_map, gw) if xi is not None else None
+            cap_id = None
+            if cap is not None:
+                cap_id = cap.get("id", 0) if isinstance(cap, dict) else getattr(cap, "id", 0)
+            vice = find_best_vice_captain(xi, xpts_map, gw, captain_id=cap_id) if xi is not None else None
+            gw_entry["captain"] = cap
+            gw_entry["vice_captain"] = vice
+            gw_entry["captain_multiplier"] = 3  # captain ×3
+            gw_entry["dynamic_duo"] = True
+            dd_total = 0
+            if xi is not None and len(xi) > 0:
+                dd_total = xi["id"].map(lambda pid: xpts_map.get(pid, {}).get(gw, 0)).sum()
+                # Captain gets ×3 → +2 extra (already counted once in XI sum)
+                if cap is not None:
+                    cap_pts = xpts_map.get(cap_id, {}).get(gw, 0)
+                    dd_total += cap_pts * 2  # ×3 total = base + 2 extra
+                # Vice captain gets ×2 → +1 extra
+                if vice is not None:
+                    vice_id = vice.get("id", 0) if isinstance(vice, dict) else getattr(vice, "id", 0)
+                    vice_pts = xpts_map.get(vice_id, {}).get(gw, 0)
+                    dd_total += vice_pts * 1  # ×2 total = base + 1 extra
+            gw_entry["total_xpts"] = round(dd_total, 1)
+            gw_entry["squad"] = current_squad.copy()
+            plan.append(gw_entry)
+            continue
+
+        # === FRIKORT (Allsvenskan — permanent unlimited transfers, like Wildcard) ===
+        if chip == "frikort":
+            total_val = int(current_bank + current_squad["now_cost"].sum())
+            fk_pool = all_players_df[~all_players_df["id"].isin(banned_ids)] if banned_ids else all_players_df
+            fk_squad = solve_wildcard_squad(fk_pool, xpts_map, gw, n_gws - i, total_val,
+                                            team_fixture_counts=team_fixture_counts,
+                                            locked_ids=locked_ids)
+            if fk_squad is not None:
+                current_squad = fk_squad
+                gw_entry["squad"] = fk_squad
+                for _, p in fk_squad.iterrows():
+                    current_purchase[p["id"]] = p["now_cost"]
+                current_bank = total_val - fk_squad["now_cost"].sum()
+            current_ft = 1
+            xi, bench = solve_best_xi_for_gw(current_squad, xpts_map, gw)
+            gw_entry["xi"] = xi
+            gw_entry["bench"] = bench
+            gw_entry["captain"] = find_best_captain(xi, xpts_map, gw) if xi is not None else None
+            fk_total = 0
+            if xi is not None and len(xi) > 0:
+                fk_total = xi["id"].map(lambda pid: xpts_map.get(pid, {}).get(gw, 0)).sum()
+                cap = gw_entry.get("captain")
+                if cap is not None:
+                    cap_id = cap.get("id", 0) if isinstance(cap, dict) else getattr(cap, "id", 0)
+                    fk_total += xpts_map.get(cap_id, {}).get(gw, 0)
+            gw_entry["total_xpts"] = round(fk_total, 1)
             plan.append(gw_entry)
             continue
 
@@ -2589,23 +2867,43 @@ def main():
         f'</div>',
         unsafe_allow_html=True,
     )
-    st.markdown("")
 
-    # === Refresh button ===
-    col_refresh, col_spacer = st.columns([1, 5])
+    # === League Switcher ===
+    col_league, col_refresh, col_spacer = st.columns([1.5, 1, 4.5])
+    with col_league:
+        league_options = list(LEAGUE_CONFIGS.keys())
+        league_labels = {k: v["name"] for k, v in LEAGUE_CONFIGS.items()}
+        current_league = st.session_state.get("active_league", "FPL")
+        selected_league = st.selectbox(
+            "🏆 League",
+            options=league_options,
+            format_func=lambda x: league_labels[x],
+            index=league_options.index(current_league),
+            key="league_selector",
+            label_visibility="collapsed",
+        )
+        if selected_league != current_league:
+            st.session_state["active_league"] = selected_league
+            st.cache_data.clear()
+            st.rerun()
+
     with col_refresh:
         if st.button("🔄 Refresh Data"):
             st.cache_data.clear()
             st.rerun()
 
+    # Get active league config
+    LC = get_league_config()
+    league_name = LC["name"]
+
     # === Load data ===
     fetch_time = datetime.now()
 
-    with st.spinner("Loading FPL API data..."):
+    with st.spinner(f"Loading {league_name} data..."):
         bootstrap, fixtures_raw, fpl_err = load_fpl_data()
 
     if fpl_err or bootstrap is None:
-        st.error(f"Failed to load FPL data: {fpl_err}")
+        st.error(f"Failed to load {league_name} data: {fpl_err}")
         if st.button("🔄 Retry"):
             st.cache_data.clear()
             st.rerun()
@@ -2972,7 +3270,7 @@ def main():
                     # Fixtures owed per team
                     fixtures_owed = {}
                     for t_id, count in team_fixture_total.items():
-                        owed = 38 - count
+                        owed = LC["season_gws"] - count
                         if owed > 0:
                             fixtures_owed[team_id_to_short.get(t_id, "?")] = owed
 
@@ -2989,7 +3287,7 @@ def main():
                                 pass
 
                     free_midweeks = []
-                    for gw_num in range(planning_gw_id, 38):
+                    for gw_num in range(planning_gw_id, LC["season_gws"]):
                         dt_this = gw_deadlines.get(gw_num)
                         dt_next = gw_deadlines.get(gw_num + 1)
                         if dt_this and dt_next:
@@ -3211,16 +3509,21 @@ def main():
                                     "free_hit": "⚡ FREE HIT",
                                     "triple_captain": "👑 TRIPLE CAPTAIN",
                                     "bench_boost": "💪 BENCH BOOST",
+                                    "park_the_bus": "🚌 PARK THE BUS",
+                                    "dynamic_duo": "👥 DYNAMIC DUO",
+                                    "loan_rangers": "🔄 LOAN RANGERS",
+                                    "frikort": "🎫 FRIKORT",
                                 }
                                 chip_str = f" — {chip_labels.get(chip, '')}" if chip else ""
                                 with st.expander(f"**Gameweek {gw}**{chip_str}", expanded=(gw == planning_gw_id)):
 
                                     # Transfer / chip action
-                                    if chip == "wildcard":
+                                    if chip == "wildcard" or chip == "frikort":
                                         squad_count = len(gw_entry.get("squad", []))
+                                        chip_icon = "🃏 WILDCARD" if chip == "wildcard" else "🎫 FRIKORT"
                                         st.markdown(
                                             f"<div class='transfer-card'>"
-                                            f"<span style='color:#a78bfa;font-weight:700;'>🃏 WILDCARD ACTIVE</span>"
+                                            f"<span style='color:#a78bfa;font-weight:700;'>{chip_icon} ACTIVE</span>"
                                             f"<br><span style='color:#8892a8;font-size:0.72rem;'>"
                                             f"Full squad rebuilt via MILP solver ({squad_count} players) — optimised for remaining GWs</span>"
                                             f"</div>",
@@ -3232,6 +3535,40 @@ def main():
                                             f"<span style='color:#38bdf8;font-weight:700;'>⚡ FREE HIT ACTIVE</span>"
                                             f"<br><span style='color:#8892a8;font-size:0.72rem;'>"
                                             f"Best possible squad for this single GW — reverts to your team next week</span>"
+                                            f"</div>",
+                                            unsafe_allow_html=True,
+                                        )
+                                    elif chip == "loan_rangers":
+                                        st.markdown(
+                                            f"<div class='transfer-card'>"
+                                            f"<span style='color:#38bdf8;font-weight:700;'>🔄 LOAN RANGERS ACTIVE</span>"
+                                            f"<br><span style='color:#8892a8;font-size:0.72rem;'>"
+                                            f"Best possible squad with no team limit — reverts next week</span>"
+                                            f"</div>",
+                                            unsafe_allow_html=True,
+                                        )
+                                    elif chip == "park_the_bus":
+                                        st.markdown(
+                                            f"<div class='transfer-card'>"
+                                            f"<span style='color:#34d399;font-weight:700;'>🚌 PARK THE BUS ACTIVE</span>"
+                                            f"<br><span style='color:#8892a8;font-size:0.72rem;'>"
+                                            f"All defender points doubled — no captain this GW</span>"
+                                            f"</div>",
+                                            unsafe_allow_html=True,
+                                        )
+                                    elif chip == "dynamic_duo":
+                                        vice = gw_entry.get("vice_captain")
+                                        vice_name = "?"
+                                        if vice is not None:
+                                            try:
+                                                vice_name = vice["name"] if hasattr(vice, "__getitem__") else "?"
+                                            except Exception:
+                                                pass
+                                        st.markdown(
+                                            f"<div class='transfer-card'>"
+                                            f"<span style='color:#fbbf24;font-weight:700;'>👥 DYNAMIC DUO ACTIVE</span>"
+                                            f"<br><span style='color:#8892a8;font-size:0.72rem;'>"
+                                            f"Captain ×3 + Vice Captain ({vice_name}) ×2</span>"
                                             f"</div>",
                                             unsafe_allow_html=True,
                                         )
@@ -4441,7 +4778,7 @@ def main():
                     # === FIXTURE ANALYSIS — show DGWs/blanks ===
                     st.markdown("### 📅 Fixture Analysis")
                     events_all = bootstrap.get("events", [])
-                    future_all = [e for e in events_all if e.get("id", 0) >= planning_gw_id and e.get("id", 0) <= 38]
+                    future_all = [e for e in events_all if e.get("id", 0) >= planning_gw_id and e.get("id", 0) <= LC["season_gws"]]
 
                     dgw_gws = []
                     blank_gws = []
@@ -4598,6 +4935,43 @@ def main():
                             if is_bgw:
                                 fh_gain *= 1.5  # FH is extra valuable on BGWs
                             chip_gains[gw]["freehit"] = round(fh_gain, 1)
+
+                            # === ALLSVENSKAN CHIP GAINS ===
+
+                            # PARK THE BUS gain = sum of DEF xPts (doubled) - captain bonus lost
+                            if xi is not None and len(xi) > 0:
+                                def_xpts = xi[xi["pos_id"] == 2]["id"].map(
+                                    lambda pid: xpts_map.get(pid, {}).get(gw, 0)
+                                ).sum()
+                                ptb_gain = def_xpts * dgw_mult - cap_xpts  # gain DEF double, lose captain
+                            else:
+                                ptb_gain = 0
+                            chip_gains[gw]["park_the_bus"] = round(max(ptb_gain, 0), 1)
+
+                            # DYNAMIC DUO gain = captain ×2 extra + vice captain ×1 extra
+                            # (normal captain gives ×1 extra, DD gives ×2 extra = net +1 for cap)
+                            # Plus vice captain gets ×1 extra (normally nothing)
+                            vice_xpts = 0
+                            if xi is not None and len(xi) > 0:
+                                # Find 2nd highest xPts player in XI
+                                xi_sorted = sorted(
+                                    [(pid, xpts_map.get(pid, {}).get(gw, 0)) for pid in xi["id"]],
+                                    key=lambda x: x[1], reverse=True
+                                )
+                                if len(xi_sorted) >= 2:
+                                    vice_xpts = xi_sorted[1][1]
+                            dd_gain = (cap_xpts + vice_xpts) * dgw_mult  # extra cap + vice bonus
+                            chip_gains[gw]["dynamic_duo"] = round(dd_gain, 1)
+
+                            # LOAN RANGERS gain = best possible squad (no team limit) - current XI
+                            # Similar to Free Hit but potentially better due to stacking one team
+                            lr_gain = fh_gain * 1.2  # rough estimate — stacking adds ~20%
+                            if is_dgw:
+                                lr_gain *= 1.5  # much more valuable on DGWs (stack DGW team)
+                            chip_gains[gw]["loan_rangers"] = round(lr_gain, 1)
+
+                            # FRIKORT gain = same as Wildcard
+                            chip_gains[gw]["frikort"] = 0
 
                             # WILDCARD gain: run WC plan once to measure improvement
                             # Only compute for the top 2 candidate GWs to save time
