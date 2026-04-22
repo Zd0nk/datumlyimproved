@@ -92,9 +92,12 @@ LEAGUE_CONFIGS = {
         "squad_size": 15,
         "pts_goal": {1: 6, 2: 6, 3: 5, 4: 5},
         "pts_assist": 3,
-        "pts_cs": {1: 4, 2: 4, 3: 1, 4: 0},
+        "pts_cs": {1: 5, 2: 4, 3: 1, 4: 0},  # GK gets 5 for CS (higher than FPL)
         "pts_appearance": 2,
-        "pts_bonus_avg": 0.35,
+        "pts_bonus_avg": 0.55,  # ~16 bonus pts per game avg — much higher than FPL
+        "pts_save_divisor": 2,  # 1pt per 2 saves (FPL uses 3)
+        "pts_winning_goal": 1,  # +1 for scoring the winning goal (unique to ASV)
+        "gc_threshold": 2,  # GK -1 per goal after first 2 conceded
         "transfer_cost": 4,
         "max_banked_ft": 5,
         "league_avg_goals": 1.25,  # Allsvenskan averages slightly fewer goals
@@ -3519,104 +3522,52 @@ def main():
 
                         # Pixel-art DATUMLY loading animation
                         loading_placeholder = st.empty()
-                        loading_placeholder.markdown("""
-                        <style>
-                        @keyframes pixelFill {
-                            0% { opacity: 0; transform: scale(0.3); }
-                            50% { opacity: 0.7; transform: scale(1.1); }
-                            100% { opacity: 1; transform: scale(1); }
+
+                        # Build pixel-art DATUMLY with pure CSS (no JavaScript)
+                        _px_letters = {
+                            'D': [1,1,1,0,0,1,0,0,1,0,1,0,0,0,1,1,0,0,0,1,1,0,0,0,1,1,0,0,1,0,1,1,1,0,0],
+                            'A': [0,1,1,1,0,1,0,0,0,1,1,0,0,0,1,1,1,1,1,1,1,0,0,0,1,1,0,0,0,1,1,0,0,0,1],
+                            'T': [1,1,1,1,1,0,0,1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1,0,0],
+                            'U': [1,0,0,0,1,1,0,0,0,1,1,0,0,0,1,1,0,0,0,1,1,0,0,0,1,1,0,0,0,1,0,1,1,1,0],
+                            'M': [1,0,0,0,1,1,1,0,1,1,1,0,1,0,1,1,0,0,0,1,1,0,0,0,1,1,0,0,0,1,1,0,0,0,1],
+                            'L': [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1,1,1,1,1],
+                            'Y': [1,0,0,0,1,1,0,0,0,1,0,1,0,1,0,0,0,1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1,0,0],
                         }
-                        .pixel-loader {
-                            display: flex;
-                            flex-direction: column;
-                            align-items: center;
-                            padding: 2rem 0;
-                        }
-                        .pixel-grid {
-                            display: flex;
-                            gap: 2px;
-                            margin-bottom: 1rem;
-                        }
-                        .pixel-letter {
-                            display: grid;
-                            grid-template-columns: repeat(5, 8px);
-                            grid-template-rows: repeat(7, 8px);
-                            gap: 1px;
-                            margin: 0 3px;
-                        }
-                        .px {
-                            border-radius: 1px;
-                            opacity: 0;
-                        }
-                        .px.on {
-                            animation: pixelFill 0.4s ease-out forwards;
-                        }
-                        .pixel-status {
-                            color: #8892a8;
-                            font-size: 0.85rem;
-                            margin-top: 0.5rem;
-                        }
-                        .pixel-bar {
-                            width: 200px;
-                            height: 4px;
-                            background: #1a1e2e;
-                            border-radius: 2px;
-                            overflow: hidden;
-                            margin-top: 0.8rem;
-                        }
-                        .pixel-bar-fill {
-                            height: 100%;
-                            background: linear-gradient(90deg, #00b46e, #f02d6e);
-                            border-radius: 2px;
-                            animation: barFill 3s ease-in-out infinite;
-                        }
-                        @keyframes barFill {
-                            0% { width: 0%; }
-                            50% { width: 80%; }
-                            100% { width: 100%; }
-                        }
-                        </style>
-                        <div class="pixel-loader">
-                            <div class="pixel-grid" id="pixelGrid"></div>
-                            <div class="pixel-status">Optimising your squad...</div>
-                            <div class="pixel-bar"><div class="pixel-bar-fill"></div></div>
-                        </div>
-                        <script>
-                        // DATUMLY pixel font (5x7 grid per letter, 1=filled 0=empty)
-                        const letters = {
-                            'D': [1,1,1,0,0, 1,0,0,1,0, 1,0,0,0,1, 1,0,0,0,1, 1,0,0,0,1, 1,0,0,1,0, 1,1,1,0,0],
-                            'A': [0,1,1,1,0, 1,0,0,0,1, 1,0,0,0,1, 1,1,1,1,1, 1,0,0,0,1, 1,0,0,0,1, 1,0,0,0,1],
-                            'T': [1,1,1,1,1, 0,0,1,0,0, 0,0,1,0,0, 0,0,1,0,0, 0,0,1,0,0, 0,0,1,0,0, 0,0,1,0,0],
-                            'U': [1,0,0,0,1, 1,0,0,0,1, 1,0,0,0,1, 1,0,0,0,1, 1,0,0,0,1, 1,0,0,0,1, 0,1,1,1,0],
-                            'M': [1,0,0,0,1, 1,1,0,1,1, 1,0,1,0,1, 1,0,0,0,1, 1,0,0,0,1, 1,0,0,0,1, 1,0,0,0,1],
-                            'L': [1,0,0,0,0, 1,0,0,0,0, 1,0,0,0,0, 1,0,0,0,0, 1,0,0,0,0, 1,0,0,0,0, 1,1,1,1,1],
-                            'Y': [1,0,0,0,1, 1,0,0,0,1, 0,1,0,1,0, 0,0,1,0,0, 0,0,1,0,0, 0,0,1,0,0, 0,0,1,0,0],
-                        };
-                        const word = 'DATUMLY';
-                        const colours = ['#00b46e','#f02d6e','#00b46e','#f02d6e','#00b46e','#f02d6e','#00b46e'];
-                        const grid = document.getElementById('pixelGrid');
-                        if (grid) {
-                            let pixelIdx = 0;
-                            word.split('').forEach((ch, li) => {
-                                const letterDiv = document.createElement('div');
-                                letterDiv.className = 'pixel-letter';
-                                const pattern = letters[ch] || [];
-                                pattern.forEach((on, i) => {
-                                    const px = document.createElement('div');
-                                    px.className = 'px';
-                                    px.style.background = on ? colours[li] : 'transparent';
-                                    if (on) {
-                                        px.classList.add('on');
-                                        px.style.animationDelay = (pixelIdx * 15) + 'ms';
-                                        pixelIdx++;
-                                    }
-                                    letterDiv.appendChild(px);
-                                });
-                                grid.appendChild(letterDiv);
-                            });
-                        }
-                        </script>
-                        """, unsafe_allow_html=True)
+                        _px_word = 'DATUMLY'
+                        _px_cols = ['#00b46e','#f02d6e','#00b46e','#f02d6e','#00b46e','#f02d6e','#00b46e']
+                        _px_html = []
+                        _px_idx = 0
+                        for _li, _ch in enumerate(_px_word):
+                            _pat = _px_letters[_ch]
+                            _divs = []
+                            for _on in _pat:
+                                if _on:
+                                    _divs.append(f'<div class="dl-px" style="background:{_px_cols[_li]};animation-delay:{_px_idx * 18}ms"></div>')
+                                    _px_idx += 1
+                                else:
+                                    _divs.append('<div class="dl-px dl-off"></div>')
+                            _px_html.append(f'<div class="dl-let">{"".join(_divs)}</div>')
+
+                        loading_placeholder.markdown(
+                            '<style>'
+                            '@keyframes pxPop{0%{opacity:0;transform:scale(0.2)}60%{opacity:1;transform:scale(1.15)}100%{opacity:1;transform:scale(1)}}'
+                            '@keyframes barSlide{0%{width:0}50%{width:75%}100%{width:100%}}'
+                            '.dl-wrap{display:flex;flex-direction:column;align-items:center;padding:2rem 0}'
+                            '.dl-grid{display:flex;gap:3px;margin-bottom:1.2rem}'
+                            '.dl-let{display:grid;grid-template-columns:repeat(5,9px);grid-template-rows:repeat(7,9px);gap:2px;margin:0 4px}'
+                            '.dl-px{border-radius:2px;width:9px;height:9px;opacity:0;animation:pxPop 0.35s ease-out forwards}'
+                            '.dl-off{background:transparent!important;animation:none!important}'
+                            '.dl-status{color:#8892a8;font-size:0.85rem;margin-top:0.5rem}'
+                            '.dl-bar{width:220px;height:4px;background:#1a1e2e;border-radius:2px;overflow:hidden;margin-top:1rem}'
+                            '.dl-bar-fill{height:100%;background:linear-gradient(90deg,#00b46e,#f02d6e);border-radius:2px;animation:barSlide 3s ease-in-out infinite}'
+                            '</style>'
+                            '<div class="dl-wrap">'
+                            '<div class="dl-grid">' + "".join(_px_html) + '</div>'
+                            '<div class="dl-status">Optimising your squad...</div>'
+                            '<div class="dl-bar"><div class="dl-bar-fill"></div></div>'
+                            '</div>',
+                            unsafe_allow_html=True,
+                        )
 
                         plan = build_rolling_plan(
                             my_squad, df,
