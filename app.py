@@ -112,6 +112,43 @@ LEAGUE_CONFIGS = {
         "has_defcon": False,  # Allsvenskan doesn't have DefCon points
         "page_title": "Datumly - Allsvenskan Intelligence",
     },
+    "Eliteserien": {
+        "name": "Eliteserien Fantasy",
+        "short_name": "ELS",
+        "country": "Norway",
+        "base_url": "https://fantasy.eliteserien.no/api",
+        "football_data_url": None,
+        "odds_api_league": "soccer_norway_eliteserien",
+        "n_teams": 16,
+        "season_gws": 30,
+        "half_season_gw": 15,
+        "budget": 1000,
+        "currency": "kr",
+        "currency_unit": "m",
+        "max_per_team": 3,
+        "squad_size": 15,
+        "pts_goal": {1: 6, 2: 6, 3: 5, 4: 5},
+        "pts_assist": 3,
+        "pts_cs": {1: 4, 2: 4, 3: 1, 4: 0},
+        "pts_appearance": 2,
+        "pts_bonus_avg": 0.35,
+        "transfer_cost": 4,
+        "max_banked_ft": 5,
+        "league_avg_goals": 1.40,
+        "chips": {
+            "wildcard": {"name": "Wildcard", "icon": "🃏", "per_half": True, "count": 1},
+            "park_the_bus": {"name": "Park the Bus", "icon": "🚌", "per_half": False, "count": 1},
+            "dynamic_duo": {"name": "Dynamic Duo", "icon": "👥", "per_half": False, "count": 1},
+            "loan_rangers": {"name": "Loan Rangers", "icon": "🔄", "per_half": False, "count": 1},
+        },
+        "chip_api_names": {
+            "wildcard": "wildcard", "freehit": "loan_rangers",
+            "3xc": "dynamic_duo", "bboost": "park_the_bus",
+        },
+        "has_frikort": True,
+        "has_defcon": False,
+        "page_title": "Datumly - Eliteserien Intelligence",
+    },
 }
 
 # Default league (will be overridden by UI selection)
@@ -209,8 +246,28 @@ TEAM_COLOURS_ASV = {
     "HBK": ("#003DA5", "#FFFFFF", "#FFFFFF"),    # Blue/white — Halmstads BK
 }
 
+TEAM_COLOURS_ELS = {
+    "BOD": ("#FFD700", "#000000", "#000000"),    # Yellow/black — Bodø/Glimt
+    "BRA": ("#E31837", "#FFFFFF", "#FFFFFF"),    # Red/white — SK Brann
+    "FRE": ("#FFFFFF", "#E31837", "#E31837"),    # White/red — Fredrikstad FK
+    "HAM": ("#FFFFFF", "#006B3F", "#006B3F"),    # White/green — HamKam
+    "KFU": ("#000000", "#FFD700", "#FFD700"),    # Black/gold — KFUM Oslo
+    "KRI": ("#1B1B1B", "#FFFFFF", "#FFFFFF"),    # Black/white — Kristiansund BK
+    "LIL": ("#FFD700", "#000000", "#000000"),    # Yellow/black — Lillestrøm SK
+    "MOL": ("#003DA5", "#FFFFFF", "#FFFFFF"),    # Blue/white — Molde FK
+    "ROS": ("#1A1A2E", "#FFFFFF", "#FFFFFF"),    # Black/white — Rosenborg BK
+    "SAN": ("#003DA5", "#FFFFFF", "#FFFFFF"),    # Blue/white — Sandefjord
+    "SAR": ("#003DA5", "#FFFFFF", "#FFFFFF"),    # Blue/white — Sarpsborg 08
+    "STA": ("#E31837", "#FFFFFF", "#FFFFFF"),    # Red/white — IK Start
+    "TRO": ("#E31837", "#003DA5", "#FFFFFF"),    # Red/blue — Tromsø IL
+    "VIK": ("#003DA5", "#FFD700", "#FFFFFF"),    # Blue/gold — Viking FK
+    "VIF": ("#003DA5", "#E31837", "#FFFFFF"),    # Blue/red — Vålerenga IF
+    "AAL": ("#FF6600", "#000000", "#FFFFFF"),    # Orange/black — Aalesund FK
+}
+
 # Select active colour map based on league
-TEAM_COLOURS = TEAM_COLOURS_FPL if LC["short_name"] == "FPL" else TEAM_COLOURS_ASV
+_colour_maps = {"FPL": TEAM_COLOURS_FPL, "ASV": TEAM_COLOURS_ASV, "ELS": TEAM_COLOURS_ELS}
+TEAM_COLOURS = _colour_maps.get(LC["short_name"], TEAM_COLOURS_FPL)
 
 # GK kit colours (separate — keepers wear different kits)
 GK_COLOURS = {
@@ -368,9 +425,10 @@ def load_club_elo():
         df = pd.read_csv(StringIO(resp.text), sep=",")
         if len(df) == 0:
             return None, "Empty response"
-        eng = df[(df["Country"] == "ENG") & (df["Level"] == 1)].copy()
+        country_code = {"FPL": "ENG", "ASV": "SWE", "ELS": "NOR"}.get(LC["short_name"], "ENG")
+        league_data = df[(df["Country"] == country_code) & (df["Level"] == 1)].copy()
         elo_map = {}
-        for _, row in eng.iterrows():
+        for _, row in league_data.iterrows():
             elo_map[row["Club"]] = float(row["Elo"])
         return elo_map, None
     except Exception as e:
@@ -400,7 +458,17 @@ ELO_NAME_MAP_ASV = {
     "Brommapojkarna": "BPK", "Halmstad": "HBK",
 }
 
-ELO_NAME_MAP = ELO_NAME_MAP_FPL if LC["short_name"] == "FPL" else ELO_NAME_MAP_ASV
+ELO_NAME_MAP_ELS = {
+    "Bodo/Glimt": "BOD", "Brann": "BRA", "Fredrikstad": "FRE",
+    "HamKam": "HAM", "KFUM Oslo": "KFU", "Kristiansund": "KRI",
+    "Lillestrom": "LIL", "Molde": "MOL", "Rosenborg": "ROS",
+    "Sandefjord": "SAN", "Sarpsborg 08": "SAR", "Start": "STA",
+    "Tromso": "TRO", "Viking": "VIK", "Valerenga": "VIF",
+    "Aalesund": "AAL",
+}
+
+_elo_maps = {"FPL": ELO_NAME_MAP_FPL, "ASV": ELO_NAME_MAP_ASV, "ELS": ELO_NAME_MAP_ELS}
+ELO_NAME_MAP = _elo_maps.get(LC["short_name"], ELO_NAME_MAP_FPL)
 
 ODDS_API_KEY = "e6df27ee56e4f85f1b20b194e4ffd080"
 
@@ -431,7 +499,27 @@ ODDS_API_TEAM_MAP_ASV = {
     "Halmstads BK": "HBK", "Halmstad": "HBK",
 }
 
-ODDS_API_TEAM_MAP = ODDS_API_TEAM_MAP_FPL if LC["short_name"] == "FPL" else ODDS_API_TEAM_MAP_ASV
+ODDS_API_TEAM_MAP_ELS = {
+    "Bodø/Glimt": "BOD", "Bodo/Glimt": "BOD", "FK Bodø/Glimt": "BOD",
+    "SK Brann": "BRA", "Brann": "BRA",
+    "Fredrikstad FK": "FRE", "Fredrikstad": "FRE",
+    "HamKam": "HAM", "Hamarkameratene": "HAM",
+    "KFUM Oslo": "KFU", "KFUM": "KFU",
+    "Kristiansund BK": "KRI", "Kristiansund": "KRI",
+    "Lillestrøm SK": "LIL", "Lillestrom": "LIL", "Lillestrøm": "LIL",
+    "Molde FK": "MOL", "Molde": "MOL",
+    "Rosenborg BK": "ROS", "Rosenborg": "ROS",
+    "Sandefjord Fotball": "SAN", "Sandefjord": "SAN",
+    "Sarpsborg 08": "SAR", "Sarpsborg 08 FF": "SAR",
+    "IK Start": "STA", "Start": "STA",
+    "Tromsø IL": "TRO", "Tromso": "TRO", "Tromsø": "TRO",
+    "Viking FK": "VIK", "Viking": "VIK",
+    "Vålerenga IF": "VIF", "Valerenga": "VIF", "Vålerenga": "VIF",
+    "Aalesunds FK": "AAL", "Aalesund": "AAL",
+}
+
+_odds_maps = {"FPL": ODDS_API_TEAM_MAP_FPL, "ASV": ODDS_API_TEAM_MAP_ASV, "ELS": ODDS_API_TEAM_MAP_ELS}
+ODDS_API_TEAM_MAP = _odds_maps.get(LC["short_name"], ODDS_API_TEAM_MAP_FPL)
 
 
 @st.cache_data(ttl=21600)
@@ -3429,9 +3517,109 @@ def main():
                     if generate or st.session_state.get("plan_generated"):
                         st.session_state["plan_generated"] = True
 
-                        with st.spinner("Building 6-gameweek rolling plan..."):
-                            plan = build_rolling_plan(
-                                my_squad, df,
+                        # Pixel-art DATUMLY loading animation
+                        loading_placeholder = st.empty()
+                        loading_placeholder.markdown("""
+                        <style>
+                        @keyframes pixelFill {
+                            0% { opacity: 0; transform: scale(0.3); }
+                            50% { opacity: 0.7; transform: scale(1.1); }
+                            100% { opacity: 1; transform: scale(1); }
+                        }
+                        .pixel-loader {
+                            display: flex;
+                            flex-direction: column;
+                            align-items: center;
+                            padding: 2rem 0;
+                        }
+                        .pixel-grid {
+                            display: flex;
+                            gap: 2px;
+                            margin-bottom: 1rem;
+                        }
+                        .pixel-letter {
+                            display: grid;
+                            grid-template-columns: repeat(5, 8px);
+                            grid-template-rows: repeat(7, 8px);
+                            gap: 1px;
+                            margin: 0 3px;
+                        }
+                        .px {
+                            border-radius: 1px;
+                            opacity: 0;
+                        }
+                        .px.on {
+                            animation: pixelFill 0.4s ease-out forwards;
+                        }
+                        .pixel-status {
+                            color: #8892a8;
+                            font-size: 0.85rem;
+                            margin-top: 0.5rem;
+                        }
+                        .pixel-bar {
+                            width: 200px;
+                            height: 4px;
+                            background: #1a1e2e;
+                            border-radius: 2px;
+                            overflow: hidden;
+                            margin-top: 0.8rem;
+                        }
+                        .pixel-bar-fill {
+                            height: 100%;
+                            background: linear-gradient(90deg, #00b46e, #f02d6e);
+                            border-radius: 2px;
+                            animation: barFill 3s ease-in-out infinite;
+                        }
+                        @keyframes barFill {
+                            0% { width: 0%; }
+                            50% { width: 80%; }
+                            100% { width: 100%; }
+                        }
+                        </style>
+                        <div class="pixel-loader">
+                            <div class="pixel-grid" id="pixelGrid"></div>
+                            <div class="pixel-status">Optimising your squad...</div>
+                            <div class="pixel-bar"><div class="pixel-bar-fill"></div></div>
+                        </div>
+                        <script>
+                        // DATUMLY pixel font (5x7 grid per letter, 1=filled 0=empty)
+                        const letters = {
+                            'D': [1,1,1,0,0, 1,0,0,1,0, 1,0,0,0,1, 1,0,0,0,1, 1,0,0,0,1, 1,0,0,1,0, 1,1,1,0,0],
+                            'A': [0,1,1,1,0, 1,0,0,0,1, 1,0,0,0,1, 1,1,1,1,1, 1,0,0,0,1, 1,0,0,0,1, 1,0,0,0,1],
+                            'T': [1,1,1,1,1, 0,0,1,0,0, 0,0,1,0,0, 0,0,1,0,0, 0,0,1,0,0, 0,0,1,0,0, 0,0,1,0,0],
+                            'U': [1,0,0,0,1, 1,0,0,0,1, 1,0,0,0,1, 1,0,0,0,1, 1,0,0,0,1, 1,0,0,0,1, 0,1,1,1,0],
+                            'M': [1,0,0,0,1, 1,1,0,1,1, 1,0,1,0,1, 1,0,0,0,1, 1,0,0,0,1, 1,0,0,0,1, 1,0,0,0,1],
+                            'L': [1,0,0,0,0, 1,0,0,0,0, 1,0,0,0,0, 1,0,0,0,0, 1,0,0,0,0, 1,0,0,0,0, 1,1,1,1,1],
+                            'Y': [1,0,0,0,1, 1,0,0,0,1, 0,1,0,1,0, 0,0,1,0,0, 0,0,1,0,0, 0,0,1,0,0, 0,0,1,0,0],
+                        };
+                        const word = 'DATUMLY';
+                        const colours = ['#00b46e','#f02d6e','#00b46e','#f02d6e','#00b46e','#f02d6e','#00b46e'];
+                        const grid = document.getElementById('pixelGrid');
+                        if (grid) {
+                            let pixelIdx = 0;
+                            word.split('').forEach((ch, li) => {
+                                const letterDiv = document.createElement('div');
+                                letterDiv.className = 'pixel-letter';
+                                const pattern = letters[ch] || [];
+                                pattern.forEach((on, i) => {
+                                    const px = document.createElement('div');
+                                    px.className = 'px';
+                                    px.style.background = on ? colours[li] : 'transparent';
+                                    if (on) {
+                                        px.classList.add('on');
+                                        px.style.animationDelay = (pixelIdx * 15) + 'ms';
+                                        pixelIdx++;
+                                    }
+                                    letterDiv.appendChild(px);
+                                });
+                                grid.appendChild(letterDiv);
+                            });
+                        }
+                        </script>
+                        """, unsafe_allow_html=True)
+
+                        plan = build_rolling_plan(
+                            my_squad, df,
                                 bank=team_data["bank"],
                                 free_transfers=ft_available,
                                 purchase_prices=team_data.get("purchase_prices", {}),
@@ -3445,7 +3633,8 @@ def main():
                                 banned_ids=planner_banned_ids,
                             )
 
-                        st.markdown("")
+                        # Clear the loading animation
+                        loading_placeholder.empty()
 
                         # Plan summary
                         if plan:
