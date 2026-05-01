@@ -16,6 +16,7 @@ UI: Streamlit with 6 tabs
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 import requests
 import pandas as pd
 import numpy as np
@@ -3048,6 +3049,14 @@ def main():
         "🔬 Backtest", "🎯 Chip Strategy"
     ])
 
+    if st.session_state.pop("navigate_to_my_team", False):
+        components.html("""<script>
+        setTimeout(function(){
+            var t=window.parent.document.querySelectorAll('.stTabs button[data-baseweb="tab"]');
+            if(t&&t.length>0)t[0].click();
+        },300);
+        </script>""", height=0)
+
     active = df[df["minutes"] > 0].copy()
     qualified = df[df["minutes"] > 45].copy()
 
@@ -3519,75 +3528,77 @@ def main():
 
                     if generate or st.session_state.get("plan_generated"):
                         st.session_state["plan_generated"] = True
+                        plan = st.session_state.get("last_plan")
 
-                        # Pixel-art DATUMLY loading animation
-                        loading_placeholder = st.empty()
+                        if generate:
+                            loading_placeholder = st.empty()
 
-                        # Build pixel-art DATUMLY with pure CSS (no JavaScript)
-                        _px_letters = {
-                            'D': [1,1,1,0,0,1,0,0,1,0,1,0,0,0,1,1,0,0,0,1,1,0,0,0,1,1,0,0,1,0,1,1,1,0,0],
-                            'A': [0,1,1,1,0,1,0,0,0,1,1,0,0,0,1,1,1,1,1,1,1,0,0,0,1,1,0,0,0,1,1,0,0,0,1],
-                            'T': [1,1,1,1,1,0,0,1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1,0,0],
-                            'U': [1,0,0,0,1,1,0,0,0,1,1,0,0,0,1,1,0,0,0,1,1,0,0,0,1,1,0,0,0,1,0,1,1,1,0],
-                            'M': [1,0,0,0,1,1,1,0,1,1,1,0,1,0,1,1,0,0,0,1,1,0,0,0,1,1,0,0,0,1,1,0,0,0,1],
-                            'L': [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1,1,1,1,1],
-                            'Y': [1,0,0,0,1,1,0,0,0,1,0,1,0,1,0,0,0,1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1,0,0],
-                        }
-                        _px_word = 'DATUMLY'
-                        _px_cols = ['#00b46e','#f02d6e','#00b46e','#f02d6e','#00b46e','#f02d6e','#00b46e']
-                        _px_html = []
-                        _px_idx = 0
-                        for _li, _ch in enumerate(_px_word):
-                            _pat = _px_letters[_ch]
-                            _divs = []
-                            for _on in _pat:
-                                if _on:
-                                    _divs.append(f'<div class="dl-px" style="background:{_px_cols[_li]};box-shadow:0 0 5px {_px_cols[_li]};animation-delay:{_px_idx * 22}ms"></div>')
-                                    _px_idx += 1
-                                else:
-                                    _divs.append('<div class="dl-px dl-off"></div>')
-                            _px_html.append(f'<div class="dl-let">{"".join(_divs)}</div>')
+                            # Build pixel-art DATUMLY with pure CSS (no JavaScript)
+                            _px_letters = {
+                                'D': [1,1,1,0,0,1,0,0,1,0,1,0,0,0,1,1,0,0,0,1,1,0,0,0,1,1,0,0,1,0,1,1,1,0,0],
+                                'A': [0,1,1,1,0,1,0,0,0,1,1,0,0,0,1,1,1,1,1,1,1,0,0,0,1,1,0,0,0,1,1,0,0,0,1],
+                                'T': [1,1,1,1,1,0,0,1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1,0,0],
+                                'U': [1,0,0,0,1,1,0,0,0,1,1,0,0,0,1,1,0,0,0,1,1,0,0,0,1,1,0,0,0,1,0,1,1,1,0],
+                                'M': [1,0,0,0,1,1,1,0,1,1,1,0,1,0,1,1,0,0,0,1,1,0,0,0,1,1,0,0,0,1,1,0,0,0,1],
+                                'L': [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1,1,1,1,1],
+                                'Y': [1,0,0,0,1,1,0,0,0,1,0,1,0,1,0,0,0,1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1,0,0],
+                            }
+                            _px_word = 'DATUMLY'
+                            _px_cols = ['#00b46e','#f02d6e','#00b46e','#f02d6e','#00b46e','#f02d6e','#00b46e']
+                            _px_html = []
+                            _px_idx = 0
+                            for _li, _ch in enumerate(_px_word):
+                                _pat = _px_letters[_ch]
+                                _divs = []
+                                for _on in _pat:
+                                    if _on:
+                                        _divs.append(f'<div class="dl-px" style="background:{_px_cols[_li]};box-shadow:0 0 5px {_px_cols[_li]};animation-delay:{_px_idx * 22}ms"></div>')
+                                        _px_idx += 1
+                                    else:
+                                        _divs.append('<div class="dl-px dl-off"></div>')
+                                _px_html.append(f'<div class="dl-let">{"".join(_divs)}</div>')
 
-                        loading_placeholder.markdown(
-                            '<style>'
-                            '@keyframes pxBlink{0%,20%{opacity:0}25%{opacity:1}40%{opacity:0}60%{opacity:1}75%{opacity:0}100%{opacity:1}}'
-                            '@keyframes barGrow{0%{width:4%}100%{width:96%}}'
-                            '.dl-wrap{display:flex;flex-direction:column;align-items:center;padding:2rem 0;position:relative}'
-                            '.dl-scanlines{position:absolute;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 3px,rgba(0,0,0,0.12) 3px,rgba(0,0,0,0.12) 4px);pointer-events:none}'
-                            '.dl-grid{display:flex;gap:4px;margin-bottom:1.5rem}'
-                            '.dl-let{display:grid;grid-template-columns:repeat(5,12px);grid-template-rows:repeat(7,12px);gap:2px;margin:0 6px}'
-                            '.dl-px{width:12px;height:12px;opacity:0;animation:pxBlink 0.5s steps(5,end) forwards}'
-                            '.dl-off{background:transparent!important;animation:none!important;opacity:0!important}'
-                            '.dl-status{color:#8892a8;font-size:0.75rem;margin-top:0.8rem;font-family:"Courier New",monospace;letter-spacing:3px;text-transform:uppercase}'
-                            '.dl-bar{width:252px;height:10px;background:#0d1117;outline:2px solid #2a3040;margin-top:1rem}'
-                            '.dl-bar-fill{height:100%;background:repeating-linear-gradient(90deg,#00b46e 0,#00b46e 14px,transparent 14px,transparent 16px);width:4%;animation:barGrow 3s steps(16,end) forwards}'
-                            '</style>'
-                            '<div class="dl-wrap">'
-                            '<div class="dl-scanlines"></div>'
-                            '<div class="dl-grid">' + "".join(_px_html) + '</div>'
-                            '<div class="dl-status">&#9658; OPTIMISING SQUAD...</div>'
-                            '<div class="dl-bar"><div class="dl-bar-fill"></div></div>'
-                            '</div>',
-                            unsafe_allow_html=True,
-                        )
-
-                        plan = build_rolling_plan(
-                            my_squad, df,
-                                bank=team_data["bank"],
-                                free_transfers=ft_available,
-                                purchase_prices=team_data.get("purchase_prices", {}),
-                                selling_prices_api=team_data.get("selling_prices_api", {}),
-                                xpts_map=xpts_map_adjusted,
-                                planning_gw_id=planning_gw_id,
-                                n_gws=6,
-                                chip_schedule=chip_schedule,
-                                team_fixture_counts=team_fixture_counts,
-                                locked_ids=planner_locked_ids,
-                                banned_ids=planner_banned_ids,
+                            loading_placeholder.markdown(
+                                '<style>'
+                                '@keyframes pxBlink{0%,20%{opacity:0}25%{opacity:1}40%{opacity:0}60%{opacity:1}75%{opacity:0}100%{opacity:1}}'
+                                '@keyframes barGrow{0%{width:4%}100%{width:96%}}'
+                                '.dl-wrap{display:flex;flex-direction:column;align-items:center;padding:2rem 0;position:relative}'
+                                '.dl-scanlines{position:absolute;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 3px,rgba(0,0,0,0.12) 3px,rgba(0,0,0,0.12) 4px);pointer-events:none}'
+                                '.dl-grid{display:flex;gap:4px;margin-bottom:1.5rem}'
+                                '.dl-let{display:grid;grid-template-columns:repeat(5,12px);grid-template-rows:repeat(7,12px);gap:2px;margin:0 6px}'
+                                '.dl-px{width:12px;height:12px;opacity:0;animation:pxBlink 0.5s steps(5,end) forwards}'
+                                '.dl-off{background:transparent!important;animation:none!important;opacity:0!important}'
+                                '.dl-status{color:#8892a8;font-size:0.75rem;margin-top:0.8rem;font-family:"Courier New",monospace;letter-spacing:3px;text-transform:uppercase}'
+                                '.dl-bar{width:252px;height:10px;background:#0d1117;outline:2px solid #2a3040;margin-top:1rem}'
+                                '.dl-bar-fill{height:100%;background:repeating-linear-gradient(90deg,#00b46e 0,#00b46e 14px,transparent 14px,transparent 16px);width:4%;animation:barGrow 3s steps(16,end) forwards}'
+                                '</style>'
+                                '<div class="dl-wrap">'
+                                '<div class="dl-scanlines"></div>'
+                                '<div class="dl-grid">' + "".join(_px_html) + '</div>'
+                                '<div class="dl-status">&#9658; OPTIMISING SQUAD...</div>'
+                                '<div class="dl-bar"><div class="dl-bar-fill"></div></div>'
+                                '</div>',
+                                unsafe_allow_html=True,
                             )
 
-                        # Clear the loading animation
-                        loading_placeholder.empty()
+                            plan = build_rolling_plan(
+                                my_squad, df,
+                                    bank=team_data["bank"],
+                                    free_transfers=ft_available,
+                                    purchase_prices=team_data.get("purchase_prices", {}),
+                                    selling_prices_api=team_data.get("selling_prices_api", {}),
+                                    xpts_map=xpts_map_adjusted,
+                                    planning_gw_id=planning_gw_id,
+                                    n_gws=6,
+                                    chip_schedule=chip_schedule,
+                                    team_fixture_counts=team_fixture_counts,
+                                    locked_ids=planner_locked_ids,
+                                    banned_ids=planner_banned_ids,
+                                )
+                            st.session_state["last_plan"] = plan
+
+                            # Clear the loading animation
+                            loading_placeholder.empty()
 
                         # Plan summary
                         if plan:
@@ -5256,6 +5267,7 @@ def main():
                                 # Store applied strategy and flag to auto-run the planner
                                 st.session_state["applied_chip_schedule"] = dict(schedule)
                                 st.session_state["plan_auto_run"] = True
+                                st.session_state["navigate_to_my_team"] = True
                                 st.rerun()
 
                     # Per-GW breakdown: compare BEST vs BASELINE
