@@ -3542,7 +3542,7 @@ def main():
                             _divs = []
                             for _on in _pat:
                                 if _on:
-                                    _divs.append(f'<div class="dl-px" style="background:{_px_cols[_li]};animation-delay:{_px_idx * 18}ms"></div>')
+                                    _divs.append(f'<div class="dl-px" style="background:{_px_cols[_li]};box-shadow:0 0 5px {_px_cols[_li]};animation-delay:{_px_idx * 22}ms"></div>')
                                     _px_idx += 1
                                 else:
                                     _divs.append('<div class="dl-px dl-off"></div>')
@@ -3550,20 +3550,22 @@ def main():
 
                         loading_placeholder.markdown(
                             '<style>'
-                            '@keyframes pxPop{0%{opacity:0;transform:scale(0.2)}60%{opacity:1;transform:scale(1.15)}100%{opacity:1;transform:scale(1)}}'
-                            '@keyframes barSlide{0%{width:0}50%{width:75%}100%{width:100%}}'
-                            '.dl-wrap{display:flex;flex-direction:column;align-items:center;padding:2rem 0}'
-                            '.dl-grid{display:flex;gap:3px;margin-bottom:1.2rem}'
-                            '.dl-let{display:grid;grid-template-columns:repeat(5,9px);grid-template-rows:repeat(7,9px);gap:2px;margin:0 4px}'
-                            '.dl-px{border-radius:2px;width:9px;height:9px;opacity:0;animation:pxPop 0.35s ease-out forwards}'
-                            '.dl-off{background:transparent!important;animation:none!important}'
-                            '.dl-status{color:#8892a8;font-size:0.85rem;margin-top:0.5rem}'
-                            '.dl-bar{width:220px;height:4px;background:#1a1e2e;border-radius:2px;overflow:hidden;margin-top:1rem}'
-                            '.dl-bar-fill{height:100%;background:linear-gradient(90deg,#00b46e,#f02d6e);border-radius:2px;animation:barSlide 3s ease-in-out infinite}'
+                            '@keyframes pxBlink{0%,20%{opacity:0}25%{opacity:1}40%{opacity:0}60%{opacity:1}75%{opacity:0}100%{opacity:1}}'
+                            '@keyframes barGrow{0%{width:4%}100%{width:96%}}'
+                            '.dl-wrap{display:flex;flex-direction:column;align-items:center;padding:2rem 0;position:relative}'
+                            '.dl-scanlines{position:absolute;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 3px,rgba(0,0,0,0.12) 3px,rgba(0,0,0,0.12) 4px);pointer-events:none}'
+                            '.dl-grid{display:flex;gap:4px;margin-bottom:1.5rem}'
+                            '.dl-let{display:grid;grid-template-columns:repeat(5,12px);grid-template-rows:repeat(7,12px);gap:2px;margin:0 6px}'
+                            '.dl-px{width:12px;height:12px;opacity:0;animation:pxBlink 0.5s steps(5,end) forwards}'
+                            '.dl-off{background:transparent!important;animation:none!important;opacity:0!important}'
+                            '.dl-status{color:#8892a8;font-size:0.75rem;margin-top:0.8rem;font-family:"Courier New",monospace;letter-spacing:3px;text-transform:uppercase}'
+                            '.dl-bar{width:252px;height:10px;background:#0d1117;outline:2px solid #2a3040;margin-top:1rem}'
+                            '.dl-bar-fill{height:100%;background:repeating-linear-gradient(90deg,#00b46e 0,#00b46e 14px,transparent 14px,transparent 16px);width:4%;animation:barGrow 3s steps(16,end) forwards}'
                             '</style>'
                             '<div class="dl-wrap">'
+                            '<div class="dl-scanlines"></div>'
                             '<div class="dl-grid">' + "".join(_px_html) + '</div>'
-                            '<div class="dl-status">Optimising your squad...</div>'
+                            '<div class="dl-status">&#9658; OPTIMISING SQUAD...</div>'
                             '<div class="dl-bar"><div class="dl-bar-fill"></div></div>'
                             '</div>',
                             unsafe_allow_html=True,
