@@ -3307,6 +3307,12 @@ def main():
                     planner_locked_ids = set(planner_locked)
                     planner_banned_ids = set(planner_banned)
 
+                    _settings_fp = json.dumps({
+                        "chip_schedule": chip_schedule,
+                        "locked": sorted(planner_locked_ids),
+                        "banned": sorted(planner_banned_ids),
+                    }, sort_keys=True, default=str)
+
                     st.markdown("")
 
                     # Step 3: Expected blanks & doubles
@@ -3596,9 +3602,14 @@ def main():
                                     banned_ids=planner_banned_ids,
                                 )
                             st.session_state["last_plan"] = plan
+                            st.session_state["last_plan_fingerprint"] = _settings_fp
 
                             # Clear the loading animation
                             loading_placeholder.empty()
+
+                        # Warn if settings have changed since plan was generated
+                        if plan and not generate and st.session_state.get("last_plan_fingerprint") != _settings_fp:
+                            st.warning("⚠️ Settings have changed since this plan was generated. Click **🚀 Generate 6-Gameweek Plan** above to refresh.")
 
                         # Plan summary
                         if plan:
