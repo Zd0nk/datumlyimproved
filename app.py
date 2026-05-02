@@ -3347,46 +3347,55 @@ def render_fdr(upcoming, teams):
 def render_landing_block(current_gw, df, team_data):
     """Render the 'What's new for you' block above the tabs.
 
-    Three tiles: live deadline countdown, personalized welcome / last-GW
-    score, and a recommended captain. When no team is loaded, the second
-    tile becomes a CTA and the third falls back to the global top pick.
+    Three tiles: deadline countdown (server-rendered, refreshes each rerun),
+    personalized welcome / last-GW score, and a recommended captain. When no
+    team is loaded, the second tile becomes a CTA and the third falls back
+    to the global top pick.
+
+    Note: HTML is built as flat single-line strings — Streamlit's markdown
+    renderer treats any line indented 4+ spaces as a code block.
     """
-    # --- Tile 1: deadline countdown ---
+    # --- Tile 1: deadline countdown (server-computed) ---
+    countdown_text = "—"
+    countdown_class = ""
+    deadline_str = "—"
+    gw_label = "GW —"
     if current_gw and current_gw.get("deadline_time"):
-        deadline = datetime.fromisoformat(current_gw["deadline_time"].replace("Z", "+00:00"))
-        deadline_iso = deadline.isoformat()
-        deadline_str = deadline.strftime("%a %d %b · %H:%M")
-        gw_label = f"GW{current_gw.get('id', '?')}"
-        finished = bool(current_gw.get("finished"))
-    else:
-        deadline_iso = ""
-        deadline_str = "—"
-        gw_label = "GW —"
-        finished = False
+        try:
+            deadline = datetime.fromisoformat(current_gw["deadline_time"].replace("Z", "+00:00"))
+            deadline_str = deadline.strftime("%a %d %b · %H:%M")
+            gw_label = f"GW{current_gw.get('id', '?')}"
+            now = datetime.now(deadline.tzinfo)
+            diff = (deadline - now).total_seconds()
+            if current_gw.get("finished") or diff <= 0:
+                countdown_text = "Live"
+                countdown_class = "lt-live"
+            else:
+                d = int(diff // 86400)
+                h = int((diff % 86400) // 3600)
+                m = int((diff % 3600) // 60)
+                if d > 0:
+                    countdown_text = f"{d}d {h:02d}h {m:02d}m"
+                else:
+                    s = int(diff % 60)
+                    countdown_text = f"{h:02d}h {m:02d}m {s:02d}s"
+                if d == 0 and h < 6:
+                    countdown_class = "lt-urgent"
+        except Exception:
+            pass
 
-    countdown_id = f"dl-cd-{abs(hash(deadline_iso)) % 100000}"
-    if finished:
-        cd_html = '<div class="lt-value">Live</div>'
-    elif deadline_iso:
-        cd_html = (
-            f'<div class="lt-value lt-countdown" id="{countdown_id}" '
-            f'data-deadline="{deadline_iso}">…</div>'
-        )
-    else:
-        cd_html = '<div class="lt-value">—</div>'
-
-    tile_deadline = f"""
-    <div class="landing-tile lt-deadline">
-        <div class="lt-icon">⏱</div>
-        <div class="lt-label">{gw_label} Deadline</div>
-        {cd_html}
-        <div class="lt-sub">{deadline_str}</div>
-    </div>
-    """
+    tile_deadline = (
+        f'<div class="landing-tile lt-deadline">'
+        f'<div class="lt-icon">⏱</div>'
+        f'<div class="lt-label">{gw_label} Deadline</div>'
+        f'<div class="lt-value lt-countdown {countdown_class}">{countdown_text}</div>'
+        f'<div class="lt-sub">{deadline_str}</div>'
+        f'</div>'
+    )
 
     # --- Tile 2: welcome / last-GW score ---
     if team_data:
-        team_name = team_data.get("team_name", "Your team")
+        team_name = str(team_data.get("team_name", "Your team"))
         last_pts = team_data.get("last_gw_points")
         last_rank = team_data.get("last_gw_rank")
         overall_rank = team_data.get("overall_rank")
@@ -3404,23 +3413,23 @@ def render_landing_block(current_gw, df, team_data):
                 if isinstance(overall_rank, int)
                 else "Squad loaded"
             )
-        tile_welcome = f"""
-        <div class="landing-tile lt-welcome">
-            <div class="lt-icon">👋</div>
-            <div class="lt-label">{team_name}</div>
-            <div class="lt-value lt-welcome-value">{big}</div>
-            <div class="lt-sub">{sub}</div>
-        </div>
-        """
+        tile_welcome = (
+            f'<div class="landing-tile lt-welcome">'
+            f'<div class="lt-icon">👋</div>'
+            f'<div class="lt-label">{team_name}</div>'
+            f'<div class="lt-value lt-welcome-value">{big}</div>'
+            f'<div class="lt-sub">{sub}</div>'
+            f'</div>'
+        )
     else:
-        tile_welcome = """
-        <div class="landing-tile lt-welcome lt-cta">
-            <div class="lt-icon">👋</div>
-            <div class="lt-label">Make it personal</div>
-            <div class="lt-value lt-welcome-value">Add your FPL ID</div>
-            <div class="lt-sub">See your team, captain pick, and transfer ideas</div>
-        </div>
-        """
+        tile_welcome = (
+            '<div class="landing-tile lt-welcome lt-cta">'
+            '<div class="lt-icon">👋</div>'
+            '<div class="lt-label">Make it personal</div>'
+            '<div class="lt-value lt-welcome-value">Add your FPL ID</div>'
+            '<div class="lt-sub">See your team, captain pick, and transfer ideas</div>'
+            '</div>'
+        )
 
     # --- Tile 3: recommended captain ---
     captain_pool = None
@@ -3431,8 +3440,7 @@ def render_landing_block(current_gw, df, team_data):
             captain_pool = squad
             captain_label = "Recommended Captain"
     if captain_pool is None and df is not None:
-        # Fall back to global top by next-GW xPts among likely starters
-        captain_pool = df[df.get("minutes", 0) > 0] if "minutes" in df.columns else df
+        captain_pool = df[df["minutes"] > 0] if "minutes" in df.columns else df
 
     cap_name, cap_team, cap_xpts = "—", "", None
     if captain_pool is not None and len(captain_pool) > 0 and "xpts_next_gw" in captain_pool.columns:
@@ -3441,53 +3449,17 @@ def render_landing_block(current_gw, df, team_data):
         cap_team = str(top.get("team", ""))
         cap_xpts = float(top.get("xpts_next_gw", 0) or 0)
 
-    cap_big = cap_name
-    cap_sub = (
-        f"{cap_xpts:.1f} xPts · {cap_team}"
-        if cap_xpts is not None
-        else "—"
+    cap_sub = f"{cap_xpts:.1f} xPts · {cap_team}" if cap_xpts is not None else "—"
+    tile_captain = (
+        f'<div class="landing-tile lt-captain">'
+        f'<div class="lt-icon">©</div>'
+        f'<div class="lt-label">{captain_label}</div>'
+        f'<div class="lt-value lt-captain-name">{cap_name}</div>'
+        f'<div class="lt-sub">{cap_sub}</div>'
+        f'</div>'
     )
-    tile_captain = f"""
-    <div class="landing-tile lt-captain">
-        <div class="lt-icon">©</div>
-        <div class="lt-label">{captain_label}</div>
-        <div class="lt-value lt-captain-name">{cap_big}</div>
-        <div class="lt-sub">{cap_sub}</div>
-    </div>
-    """
 
-    block = f"""
-    <div class="landing-grid">
-        {tile_deadline}
-        {tile_welcome}
-        {tile_captain}
-    </div>
-    <script>
-    (function() {{
-        var el = document.getElementById("{countdown_id}");
-        if (!el) return;
-        var deadline = new Date(el.getAttribute("data-deadline")).getTime();
-        function tick() {{
-            var now = Date.now();
-            var diff = deadline - now;
-            if (diff <= 0) {{ el.textContent = "Live"; el.classList.add("lt-live"); return; }}
-            var d = Math.floor(diff / 86400000);
-            var h = Math.floor((diff % 86400000) / 3600000);
-            var m = Math.floor((diff % 3600000) / 60000);
-            var s = Math.floor((diff % 60000) / 1000);
-            var parts = [];
-            if (d) parts.push(d + "d");
-            parts.push(String(h).padStart(2,"0") + "h");
-            parts.push(String(m).padStart(2,"0") + "m");
-            if (!d) parts.push(String(s).padStart(2,"0") + "s");
-            el.textContent = parts.join(" ");
-            if (d === 0 && h < 6) el.classList.add("lt-urgent");
-        }}
-        tick();
-        setInterval(tick, 1000);
-    }})();
-    </script>
-    """
+    block = f'<div class="landing-grid">{tile_deadline}{tile_welcome}{tile_captain}</div>'
     st.markdown(block, unsafe_allow_html=True)
 
 
