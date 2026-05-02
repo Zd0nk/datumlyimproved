@@ -30,6 +30,7 @@ from pulp import (
 )
 from datetime import datetime, timedelta
 from io import StringIO
+from concurrent.futures import ThreadPoolExecutor
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -963,40 +964,54 @@ def load_recent_gw_live_data(current_gw_id, n_recent=7):
     player_gw_data = {}
 
     start_gw = max(1, current_gw_id - n_recent)
-    for gw in range(start_gw, current_gw_id):
+    gws_to_fetch = list(range(start_gw, current_gw_id))
+    if not gws_to_fetch:
+        return player_gw_data
+
+    def _fetch(gw):
         try:
             resp = requests.get(
                 f"{FPL_BASE}/event/{gw}/live/",
                 headers=headers, timeout=15,
             )
             if resp.status_code != 200:
-                continue
-            data = resp.json()
-            elements = data.get("elements", [])
-            for el in elements:
-                pid = el["id"]
-                stats = el.get("stats", {})
-                minutes = stats.get("minutes", 0)
-
-                if pid not in player_gw_data:
-                    player_gw_data[pid] = []
-                player_gw_data[pid].append({
-                    "gw": gw,
-                    "minutes": minutes,
-                    "started": 1 if minutes >= 60 else 0,
-                    "appeared": 1 if minutes > 0 else 0,
-                    "goals": stats.get("goals_scored", 0),
-                    "assists": stats.get("assists", 0),
-                    "xG": float(stats.get("expected_goals", 0) or 0),
-                    "xA": float(stats.get("expected_assists", 0) or 0),
-                    "xGC": float(stats.get("expected_goals_conceded", 0) or 0),
-                    "xGI": float(stats.get("expected_goal_involvements", 0) or 0),
-                    "clean_sheets": stats.get("clean_sheets", 0),
-                    "bonus": stats.get("bonus", 0),
-                    "total_points": stats.get("total_points", 0),
-                })
+                return gw, None
+            return gw, resp.json()
         except Exception:
+            return gw, None
+
+    # Fetch all GWs in parallel — FPL endpoints are independent so we get
+    # ~Nx speedup on cold cache instead of serial round-trips.
+    with ThreadPoolExecutor(max_workers=min(len(gws_to_fetch), 8)) as ex:
+        results = list(ex.map(_fetch, gws_to_fetch))
+
+    # Process in chronological order so per-player lists stay time-ordered
+    for gw, data in sorted(results, key=lambda r: r[0]):
+        if data is None:
             continue
+        elements = data.get("elements", [])
+        for el in elements:
+            pid = el["id"]
+            stats = el.get("stats", {})
+            minutes = stats.get("minutes", 0)
+
+            if pid not in player_gw_data:
+                player_gw_data[pid] = []
+            player_gw_data[pid].append({
+                "gw": gw,
+                "minutes": minutes,
+                "started": 1 if minutes >= 60 else 0,
+                "appeared": 1 if minutes > 0 else 0,
+                "goals": stats.get("goals_scored", 0),
+                "assists": stats.get("assists", 0),
+                "xG": float(stats.get("expected_goals", 0) or 0),
+                "xA": float(stats.get("expected_assists", 0) or 0),
+                "xGC": float(stats.get("expected_goals_conceded", 0) or 0),
+                "xGI": float(stats.get("expected_goal_involvements", 0) or 0),
+                "clean_sheets": stats.get("clean_sheets", 0),
+                "bonus": stats.get("bonus", 0),
+                "total_points": stats.get("total_points", 0),
+            })
 
     return player_gw_data
 
@@ -1034,6 +1049,13 @@ def compute_rotation_risk(player_gw_data, current_gw_id, n_recent=7):
         n_appeared = sum(1 for g in recent if g["appeared"])
         mins_list = [g["minutes"] for g in recent]
         avg_mins = np.mean(mins_list)
+
+        # Per-appearance minutes: only count GWs they actually played in.
+        # This is the right input for `expected_mins = avg_when_played * P(start)`,
+        # because avg_mins (above) already encodes start rate via zero-min benched
+        # GWs and would double-count if multiplied by P(start) again.
+        appeared_mins = [g["minutes"] for g in recent if g["appeared"]]
+        avg_mins_when_played = float(np.mean(appeared_mins)) if appeared_mins else 0.0
 
         start_rate = n_started / n_gws
         appear_rate = n_appeared / n_gws
@@ -1079,6 +1101,7 @@ def compute_rotation_risk(player_gw_data, current_gw_id, n_recent=7):
             "start_rate": round(start_rate, 2),
             "appear_rate": round(appear_rate, 2),
             "avg_recent_mins": round(avg_mins, 1),
+            "avg_mins_when_played": round(avg_mins_when_played, 1),
             "consistency": round(consistency, 2),
             "trend": round(trend, 2),
             "rotation_risk": risk,
@@ -1375,13 +1398,21 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
             else:
                 availability = 0.0
 
-        # Expected minutes: use rotation-aware average if available
-        if rot and rot["avg_recent_mins"] > 0:
-            # Blend recent average with season average (recent is more predictive)
-            recent_avg = rot["avg_recent_mins"]
-            expected_mins = min((recent_avg * 0.7 + avg_mins_per_gw * 0.3) * availability, 90)
+        # Expected minutes: separate "minutes per appearance" from "probability of
+        # appearing." Multiplying season avg_mins_per_gw by availability double-counts
+        # rotation, since avg_mins_per_gw already includes 0-min benched weeks.
+        # Correct formula: E[mins] = E[mins | starts] * P(starts).
+        appeared_mins = (rot or {}).get("avg_mins_when_played", 0)
+        if rot and appeared_mins > 0:
+            # Blend recent per-appearance mins with season per-appearance baseline
+            season_appeared = (mins / max(p.get("starts", 0) or 1, 1))
+            mins_per_start = appeared_mins * 0.7 + season_appeared * 0.3
+            expected_mins = min(mins_per_start * availability, 90)
         else:
-            expected_mins = min(avg_mins_per_gw * availability, 90)
+            # No recent appearance data: fall back to season average (which already
+            # encodes the historical start rate). Don't multiply by availability —
+            # that would double-discount.
+            expected_mins = min(avg_mins_per_gw, 90)
 
         # Convert to "expected 90s" for scaling xG/xA
         expected_90s = expected_mins / 90.0
@@ -1947,8 +1978,15 @@ def solve_best_xi(squad_df, xpts_col="xpts_next_gw"):
 # DATA ENRICHMENT
 # ============================================================
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def enrich_data(bootstrap, fixtures, team_odds):
-    """Combine all data sources into a single enriched DataFrame."""
+    """Combine all data sources into a single enriched DataFrame.
+
+    Cached for 1 hour because this is the heavyweight pipeline (xPts model
+    over ~700 players × 6 GWs). Inputs are already-cached outputs of
+    load_fpl_data / load_betting_odds, so the cache key is stable across
+    Streamlit reruns until those inner caches refresh.
+    """
     players_raw = bootstrap["elements"]
     teams = {t["id"]: t for t in bootstrap["teams"]}
     events = bootstrap["events"]
@@ -3217,8 +3255,10 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
                     if transfer["xpts_gain"] < 0.3:
                         break  # marginal gain, stop
             else:
-                hit_threshold = 4.0 + (hit_number * 2.0)
-                if transfer["xpts_gain"] < hit_threshold:
+                # Each hit costs exactly 4 points and the xpts_gain is over the
+                # full horizon, so a flat 4-pt break-even is the correct threshold.
+                # Escalating thresholds artificially refused profitable double hits.
+                if transfer["xpts_gain"] < 4.0:
                     break
                 total_hit += 4
 
