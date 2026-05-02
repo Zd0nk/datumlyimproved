@@ -198,20 +198,20 @@ PTS_BONUS_AVG = LC["pts_bonus_avg"]
 # League-specific settings
 league_avg_goals = LC["league_avg_goals"]
 
-DATUMLY_LOGO_SVG = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 270 80" height="120" role="img" aria-label="Datumly">
+DATUMLY_LOGO_SVG = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 232 80" height="120" role="img" aria-label="Datumly">
 <defs>
 <linearGradient id="dl_pink" x1="0" y1="0" x2="1" y2="1">
 <stop offset="0%" stop-color="#f02d6e"/>
 <stop offset="100%" stop-color="#ff6b8a"/>
 </linearGradient>
 </defs>
-<g transform="translate(4 10)">
+<g transform="translate(4 18) scale(0.733)">
 <rect x="1" y="1" width="58" height="58" rx="14" fill="url(#dl_pink)"/>
 <path d="M19 14 L19 46 L31 46 C40 46 45.5 39.5 45.5 30 C45.5 20.5 40 14 31 14 Z" fill="#0a0e17"/>
 <path d="M22 36 L27 31.5 L32 27 L37 22" stroke="#ff6b8a" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
 <circle cx="37" cy="22" r="2.8" fill="#ff6b8a"/>
 </g>
-<text x="80" y="55" font-family="'Plus Jakarta Sans', 'Inter', sans-serif" font-weight="800" font-size="42" letter-spacing="-1.4" fill="#e7ecf4">datum<tspan fill="url(#dl_pink)">ly</tspan></text>
+<text x="58" y="55" font-family="'Plus Jakarta Sans', 'Inter', sans-serif" font-weight="800" font-size="42" letter-spacing="-1.4" fill="#e7ecf4">datum<tspan fill="url(#dl_pink)">ly</tspan></text>
 </svg>'''
 POS_FULL = {1: "Goalkeeper", 2: "Defender", 3: "Midfielder", 4: "Forward"}
 
