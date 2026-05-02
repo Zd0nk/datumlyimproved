@@ -370,70 +370,314 @@ def make_shirt_svg(team_short, xpts_text, is_gk=False, is_captain=False, width=5
 # CUSTOM CSS
 # ============================================================
 st.markdown("""
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 <style>
-    .stApp { background-color: #0a0e17; }
-    header[data-testid="stHeader"] { background-color: rgba(10,14,23,0.9); backdrop-filter: blur(10px); }
+    :root {
+        --bg: #07090f;
+        --bg-grad-1: #0a0e17;
+        --bg-grad-2: #0d111c;
+        --surface: #111827;
+        --surface-2: #161f33;
+        --surface-3: #1a2236;
+        --border: #1f2940;
+        --border-strong: #2a3550;
+        --border-focus: #3a4670;
+        --text: #e7ecf4;
+        --text-muted: #9aa5c0;
+        --text-faint: #5a6580;
+        --brand: #f02d6e;
+        --brand-2: #ff6b8a;
+        --brand-grad: linear-gradient(135deg, #f02d6e 0%, #e8456e 50%, #ff6b8a 100%);
+        --accent: #38bdf8;
+        --good: #34d399;
+        --warn: #fbbf24;
+        --bad: #f87171;
+        --shadow-sm: 0 1px 2px rgba(0,0,0,0.25);
+        --shadow-md: 0 4px 12px rgba(0,0,0,0.35);
+        --shadow-glow: 0 0 0 1px rgba(240,45,110,0.18), 0 8px 24px rgba(240,45,110,0.12);
+    }
 
+    /* ---- Base ---- */
+    html, body, [class*="st-"], [class*="css-"], button, input, textarea, select {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+    }
+    .stApp {
+        background:
+            radial-gradient(1200px 600px at 12% -10%, rgba(240,45,110,0.07), transparent 60%),
+            radial-gradient(900px 500px at 95% 0%, rgba(56,189,248,0.05), transparent 60%),
+            linear-gradient(180deg, var(--bg-grad-1) 0%, var(--bg) 100%);
+        color: var(--text);
+    }
+    header[data-testid="stHeader"] {
+        background: rgba(7,9,15,0.7);
+        backdrop-filter: saturate(160%) blur(14px);
+        border-bottom: 1px solid var(--border);
+    }
+    /* Tabular figures everywhere — stat-heavy app */
+    table, code, kbd, .stDataFrame, .metric-value, .metric-sub, .gw-num,
+    .pitch-price, .pitch-shirt-xpts, .badge, .fdr-1, .fdr-2, .fdr-3, .fdr-4, .fdr-5 {
+        font-variant-numeric: tabular-nums;
+        font-feature-settings: "tnum" 1, "ss01" 1;
+    }
+    /* Custom scrollbar */
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #1c2540; border-radius: 8px; border: 2px solid var(--bg); }
+    ::-webkit-scrollbar-thumb:hover { background: #2a3658; }
+    /* Selection */
+    ::selection { background: rgba(240,45,110,0.35); color: #fff; }
+
+    /* ---- Product header ---- */
+    .app-header {
+        display: flex; align-items: baseline; gap: 0.75rem; flex-wrap: wrap;
+        padding: 0.4rem 0 0.9rem 0;
+        border-bottom: 1px solid var(--border);
+        margin-bottom: 1.1rem;
+    }
     .main-title {
-        background: linear-gradient(135deg, #f02d6e, #e8456e, #ff6b8a);
-        -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-        font-size: 2.2rem; font-weight: 800; letter-spacing: -1px; margin-bottom: 0;
+        background: var(--brand-grad);
+        -webkit-background-clip: text; background-clip: text;
+        -webkit-text-fill-color: transparent; color: transparent;
+        font-size: 1.85rem; font-weight: 800;
+        letter-spacing: -0.03em; line-height: 1; margin: 0;
     }
-    .sub-title { color: #8892a8; font-size: 0.85rem; margin-top: -8px; }
+    .sub-title {
+        color: var(--text-muted); font-size: 0.82rem; margin: 0;
+        font-weight: 500; letter-spacing: 0.01em;
+    }
+    .app-tag {
+        display: inline-flex; align-items: center; gap: 5px;
+        font-size: 0.62rem; font-weight: 700; letter-spacing: 0.12em;
+        text-transform: uppercase; color: var(--brand-2);
+        background: rgba(240,45,110,0.10);
+        border: 1px solid rgba(240,45,110,0.28);
+        padding: 3px 8px; border-radius: 999px; line-height: 1;
+    }
+    .app-tag::before {
+        content: ""; width: 5px; height: 5px; border-radius: 50%;
+        background: var(--brand-2); box-shadow: 0 0 6px var(--brand);
+    }
 
+    /* ---- Metric cards ---- */
     .metric-card {
-        background: #111827; border: 1px solid #2a3550;
-        border-radius: 14px; padding: 1.1rem; text-align: center;
+        background: linear-gradient(180deg, var(--surface) 0%, #0e1522 100%);
+        border: 1px solid var(--border-strong);
+        border-radius: 14px; padding: 1.05rem 1rem;
+        text-align: center; position: relative; overflow: hidden;
+        transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
     }
-    .metric-label { color: #5a6580; font-size: 0.68rem; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 3px; }
-    .metric-value { color: #e2e8f0; font-size: 1.6rem; font-weight: 700; }
-    .metric-sub { color: #8892a8; font-size: 0.75rem; margin-top: 2px; }
+    .metric-card::before {
+        content:""; position:absolute; left:0; right:0; top:0; height:1px;
+        background: linear-gradient(90deg, transparent, rgba(240,45,110,0.45), transparent);
+        opacity: 0; transition: opacity 160ms ease;
+    }
+    .metric-card:hover { transform: translateY(-1px); border-color: var(--border-focus); box-shadow: var(--shadow-md); }
+    .metric-card:hover::before { opacity: 1; }
+    .metric-label {
+        color: var(--text-faint); font-size: 0.66rem; font-weight: 600;
+        text-transform: uppercase; letter-spacing: 0.12em; margin-bottom: 4px;
+    }
+    .metric-value {
+        color: var(--text); font-size: 1.7rem; font-weight: 700;
+        letter-spacing: -0.02em; line-height: 1.1;
+    }
+    .metric-sub { color: var(--text-muted); font-size: 0.74rem; margin-top: 3px; font-weight: 500; }
 
-    .fdr-1 { background:#065f46; color:#6ee7b7; padding:2px 7px; border-radius:5px; font-size:0.72rem; font-weight:600; display:inline-block; margin:1px; }
-    .fdr-2 { background:#14532d; color:#86efac; padding:2px 7px; border-radius:5px; font-size:0.72rem; font-weight:600; display:inline-block; margin:1px; }
-    .fdr-3 { background:#78350f; color:#fcd34d; padding:2px 7px; border-radius:5px; font-size:0.72rem; font-weight:600; display:inline-block; margin:1px; }
-    .fdr-4 { background:#7c2d12; color:#fdba74; padding:2px 7px; border-radius:5px; font-size:0.72rem; font-weight:600; display:inline-block; margin:1px; }
-    .fdr-5 { background:#7f1d1d; color:#fca5a5; padding:2px 7px; border-radius:5px; font-size:0.72rem; font-weight:600; display:inline-block; margin:1px; }
+    /* ---- FDR chips ---- */
+    .fdr-1, .fdr-2, .fdr-3, .fdr-4, .fdr-5 {
+        padding: 2px 8px; border-radius: 6px;
+        font-size: 0.72rem; font-weight: 700;
+        display: inline-block; margin: 1px;
+        border: 1px solid transparent;
+    }
+    .fdr-1 { background: rgba(6,95,70,0.55);  color: #6ee7b7; border-color: rgba(110,231,183,0.18); }
+    .fdr-2 { background: rgba(20,83,45,0.55); color: #86efac; border-color: rgba(134,239,172,0.16); }
+    .fdr-3 { background: rgba(120,53,15,0.55); color: #fcd34d; border-color: rgba(252,211,77,0.16); }
+    .fdr-4 { background: rgba(124,45,18,0.6); color: #fdba74; border-color: rgba(253,186,116,0.18); }
+    .fdr-5 { background: rgba(127,29,29,0.6); color: #fca5a5; border-color: rgba(252,165,165,0.18); }
 
+    /* ---- Cards & panels ---- */
     .transfer-card {
-        background: #1a2236; border: 1px solid #2a3550;
-        border-radius: 10px; padding: 0.75rem 1rem; margin-bottom: 0.4rem;
+        background: linear-gradient(180deg, var(--surface-3) 0%, #141b2c 100%);
+        border: 1px solid var(--border-strong);
+        border-radius: 12px; padding: 0.8rem 1rem;
+        margin-bottom: 0.45rem;
+        transition: border-color 140ms ease, transform 140ms ease;
     }
-    .transfer-out { color: #f87171; font-weight: 600; }
-    .transfer-in { color: #34d399; font-weight: 600; }
-    .transfer-arrow { color: #38bdf8; font-size: 1.1rem; }
+    .transfer-card:hover { border-color: var(--border-focus); transform: translateY(-1px); }
+    .transfer-out { color: var(--bad); font-weight: 600; }
+    .transfer-in { color: var(--good); font-weight: 600; }
+    .transfer-arrow { color: var(--accent); font-size: 1.1rem; }
 
+    /* ---- GW bar ---- */
     .gw-bar {
-        background: #111827; border: 1px solid #2a3550; border-radius: 12px;
-        padding: 0.65rem 1.1rem; display: flex; align-items: center; gap: 1rem;
-        margin-bottom: 1rem; flex-wrap: wrap;
+        background: linear-gradient(180deg, var(--surface) 0%, #0e1522 100%);
+        border: 1px solid var(--border-strong);
+        border-radius: 14px;
+        padding: 0.7rem 1.15rem;
+        display: flex; align-items: center; gap: 1rem;
+        margin-bottom: 1.1rem; flex-wrap: wrap;
+        box-shadow: var(--shadow-sm);
     }
-    .gw-num { background: linear-gradient(135deg,#f02d6e,#ff6b8a); -webkit-background-clip: text; -webkit-text-fill-color: transparent; font-size: 1.05rem; font-weight: 700; }
-    .gw-deadline { color: #8892a8; font-size: 0.78rem; }
+    .gw-num {
+        background: var(--brand-grad);
+        -webkit-background-clip: text; background-clip: text;
+        -webkit-text-fill-color: transparent; color: transparent;
+        font-size: 1.05rem; font-weight: 800; letter-spacing: -0.01em;
+    }
+    .gw-deadline { color: var(--text-muted); font-size: 0.78rem; font-weight: 500; }
 
-    .badge { font-size:0.65rem; padding:3px 9px; border-radius:6px; font-weight:600; }
-    .badge-green { background:rgba(52,211,153,0.15); color:#34d399; }
-    .badge-yellow { background:rgba(251,191,36,0.15); color:#fbbf24; }
-    .badge-blue { background:rgba(56,189,248,0.15); color:#38bdf8; }
-
-    .pitch-row-label { color:#5a6580; font-size:0.68rem; text-transform:uppercase; letter-spacing:1px; margin-bottom:5px; margin-top:12px; }
-    .pitch-shirt-container { display:inline-flex; flex-direction:column; align-items:center; position:relative; margin:0 auto; }
-    .pitch-shirt-xpts { position:absolute; top:18px; left:50%; transform:translateX(-50%); font-weight:700; font-size:0.72rem; color:white; text-shadow:0 1px 2px rgba(0,0,0,0.5); z-index:2; }
-    .pitch-name { font-size:0.7rem; font-weight:600; color:#e2e8f0; margin-top:3px; }
-    .pitch-price { font-size:0.58rem; color:#5a6580; }
-
-    .section-header { font-size:1rem; font-weight:700; margin-bottom:0.5rem; margin-top:1rem; }
+    /* ---- Badges & source tags ---- */
+    .badge {
+        font-size: 0.66rem; padding: 3px 9px; border-radius: 999px;
+        font-weight: 700; letter-spacing: 0.02em;
+        border: 1px solid transparent;
+    }
+    .badge-green  { background: rgba(52,211,153,0.12); color: #34d399; border-color: rgba(52,211,153,0.25); }
+    .badge-yellow { background: rgba(251,191,36,0.12); color: #fbbf24; border-color: rgba(251,191,36,0.25); }
+    .badge-blue   { background: rgba(56,189,248,0.12); color: #38bdf8; border-color: rgba(56,189,248,0.25); }
 
     .source-tag {
-        display:inline-block; font-size:0.6rem; padding:2px 6px; border-radius:4px;
-        font-weight:600; margin-left:6px;
+        display: inline-block; font-size: 0.6rem; padding: 2px 7px; border-radius: 4px;
+        font-weight: 700; letter-spacing: 0.04em; margin-left: 6px;
+        text-transform: uppercase;
     }
-    .src-fpl { background:rgba(56,189,248,0.15); color:#38bdf8; }
-    .src-odds { background:rgba(251,191,36,0.15); color:#fbbf24; }
-    .src-model { background:rgba(167,139,250,0.15); color:#a78bfa; }
+    .src-fpl   { background: rgba(56,189,248,0.13); color: #38bdf8; }
+    .src-odds  { background: rgba(251,191,36,0.13); color: #fbbf24; }
+    .src-model { background: rgba(167,139,250,0.14); color: #a78bfa; }
 
-    #MainMenu {visibility:hidden;}
-    footer {visibility:hidden;}
+    /* ---- Pitch ---- */
+    .pitch-row-label {
+        color: var(--text-faint); font-size: 0.66rem; font-weight: 600;
+        text-transform: uppercase; letter-spacing: 0.14em;
+        margin: 14px 0 6px; padding-bottom: 4px;
+        border-bottom: 1px dashed var(--border);
+    }
+    .pitch-shirt-container { display: inline-flex; flex-direction: column; align-items: center; position: relative; margin: 0 auto; }
+    .pitch-shirt-xpts { position: absolute; top: 18px; left: 50%; transform: translateX(-50%); font-weight: 700; font-size: 0.72rem; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,0.5); z-index: 2; }
+    .pitch-name { font-size: 0.72rem; font-weight: 600; color: var(--text); margin-top: 5px; line-height: 1.15; }
+    .pitch-price { font-size: 0.6rem; color: var(--text-faint); font-weight: 500; }
+
+    /* ---- Section headers ---- */
+    .section-header {
+        font-size: 1.02rem; font-weight: 700; color: var(--text);
+        letter-spacing: -0.01em; line-height: 1.3;
+        margin: 1.4rem 0 0.7rem;
+        padding-left: 10px;
+        border-left: 3px solid var(--brand);
+    }
+
+    /* ---- Streamlit overrides ---- */
+    /* Tabs */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 2px; border-bottom: 1px solid var(--border);
+        background: transparent;
+    }
+    .stTabs [data-baseweb="tab"] {
+        background: transparent !important;
+        color: var(--text-muted) !important;
+        font-weight: 600 !important;
+        font-size: 0.86rem !important;
+        padding: 10px 14px !important;
+        border-radius: 8px 8px 0 0 !important;
+        border-bottom: 2px solid transparent !important;
+        transition: color 140ms ease, background 140ms ease, border-color 140ms ease;
+    }
+    .stTabs [data-baseweb="tab"]:hover {
+        color: var(--text) !important;
+        background: rgba(255,255,255,0.02) !important;
+    }
+    .stTabs [aria-selected="true"] {
+        color: var(--text) !important;
+        border-bottom: 2px solid var(--brand) !important;
+        background: rgba(240,45,110,0.05) !important;
+    }
+    .stTabs [data-baseweb="tab-highlight"] { display: none !important; }
+
+    /* Buttons */
+    .stButton > button, .stDownloadButton > button {
+        font-weight: 600 !important;
+        border-radius: 10px !important;
+        border: 1px solid var(--border-strong) !important;
+        background: var(--surface-2) !important;
+        color: var(--text) !important;
+        transition: transform 100ms ease, border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
+    }
+    .stButton > button:hover, .stDownloadButton > button:hover {
+        border-color: var(--border-focus) !important;
+        background: #1d2740 !important;
+        transform: translateY(-1px);
+    }
+    .stButton > button:active { transform: translateY(0); }
+    .stButton > button[kind="primary"], .stButton > button[data-testid*="primary"] {
+        background: var(--brand-grad) !important;
+        border: 1px solid transparent !important;
+        color: #fff !important;
+        box-shadow: var(--shadow-glow);
+    }
+    .stButton > button[kind="primary"]:hover {
+        filter: brightness(1.06);
+        box-shadow: 0 0 0 1px rgba(240,45,110,0.35), 0 10px 28px rgba(240,45,110,0.22) !important;
+    }
+
+    /* Inputs */
+    .stTextInput input, .stNumberInput input, .stSelectbox > div[data-baseweb="select"] > div, .stMultiSelect > div[data-baseweb="select"] > div {
+        background: var(--surface-2) !important;
+        border-color: var(--border-strong) !important;
+        color: var(--text) !important;
+        border-radius: 10px !important;
+    }
+    .stTextInput input:focus, .stNumberInput input:focus {
+        border-color: var(--brand) !important;
+        box-shadow: 0 0 0 3px rgba(240,45,110,0.15) !important;
+    }
+
+    /* Metrics (st.metric) */
+    [data-testid="stMetric"] {
+        background: linear-gradient(180deg, var(--surface) 0%, #0e1522 100%);
+        border: 1px solid var(--border-strong);
+        border-radius: 14px;
+        padding: 0.85rem 1rem;
+    }
+    [data-testid="stMetricLabel"] { color: var(--text-faint) !important; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; font-size: 0.66rem !important; }
+    [data-testid="stMetricValue"] { color: var(--text) !important; font-weight: 700 !important; letter-spacing: -0.02em; }
+
+    /* Expanders */
+    .streamlit-expanderHeader, [data-testid="stExpander"] summary {
+        background: var(--surface) !important;
+        border: 1px solid var(--border-strong) !important;
+        border-radius: 10px !important;
+        font-weight: 600 !important;
+    }
+
+    /* Dataframes */
+    .stDataFrame, [data-testid="stDataFrame"] {
+        border: 1px solid var(--border-strong);
+        border-radius: 10px;
+        overflow: hidden;
+    }
+
+    /* Alerts / info / warning / success */
+    [data-testid="stAlert"] {
+        border-radius: 10px;
+        border-width: 1px;
+        border-style: solid;
+    }
+
+    /* Sidebar */
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #0a0e17 0%, #07090f 100%);
+        border-right: 1px solid var(--border);
+    }
+
+    /* Hide chrome */
+    #MainMenu { visibility: hidden; }
+    footer { visibility: hidden; }
+    [data-testid="stDecoration"] { display: none; }
 </style>
 """, unsafe_allow_html=True)
 
