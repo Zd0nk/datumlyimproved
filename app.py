@@ -674,6 +674,51 @@ st.markdown("""
         border-right: 1px solid var(--border);
     }
 
+    /* ---- Landing tiles ("What's new for you") ---- */
+    .landing-grid {
+        display: grid; gap: 0.85rem;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        margin: 0.4rem 0 1.25rem;
+    }
+    @media (max-width: 900px) {
+        .landing-grid { grid-template-columns: 1fr; }
+    }
+    .landing-tile {
+        background: linear-gradient(180deg, var(--surface) 0%, #0e1522 100%);
+        border: 1px solid var(--border-strong);
+        border-radius: 14px;
+        padding: 0.95rem 1.1rem;
+        position: relative; overflow: hidden;
+        transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+    }
+    .landing-tile::before {
+        content: ""; position: absolute; left: 0; right: 0; top: 0; height: 1px;
+        background: linear-gradient(90deg, transparent, rgba(240,45,110,0.5), transparent);
+        opacity: 0; transition: opacity 160ms ease;
+    }
+    .landing-tile:hover { transform: translateY(-1px); border-color: var(--border-focus); box-shadow: var(--shadow-md); }
+    .landing-tile:hover::before { opacity: 1; }
+    .lt-icon {
+        position: absolute; top: 12px; right: 14px;
+        font-size: 1.05rem; opacity: 0.55; line-height: 1;
+    }
+    .lt-label {
+        color: var(--text-faint); font-size: 0.66rem; font-weight: 700;
+        text-transform: uppercase; letter-spacing: 0.14em;
+        margin-bottom: 6px;
+    }
+    .lt-value {
+        color: var(--text); font-size: 1.55rem; font-weight: 800;
+        letter-spacing: -0.02em; line-height: 1.15;
+        font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1;
+    }
+    .lt-welcome-value { background: var(--brand-grad); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; color: transparent; }
+    .lt-captain-name { font-size: 1.4rem; }
+    .lt-sub { color: var(--text-muted); font-size: 0.76rem; margin-top: 4px; font-weight: 500; }
+    .lt-countdown.lt-urgent { color: var(--brand-2); }
+    .lt-countdown.lt-live { color: var(--good); }
+    .lt-cta { border-style: dashed; border-color: rgba(240,45,110,0.35); background: linear-gradient(180deg, rgba(240,45,110,0.06) 0%, rgba(240,45,110,0.01) 100%); }
+
     /* Hide chrome */
     #MainMenu { visibility: hidden; }
     footer { visibility: hidden; }
@@ -2162,6 +2207,16 @@ def fetch_manager_team(manager_id, current_gw_id):
 
             free_transfers = ft
 
+        # Most recent completed GW summary (for landing block)
+        last_gw_points = None
+        last_gw_rank = None
+        last_gw_id = None
+        if current_hist:
+            _last = current_hist[-1]
+            last_gw_id = _last.get("event")
+            last_gw_points = _last.get("points")
+            last_gw_rank = _last.get("rank")
+
         # Extract chips already played
         chips_played = history.get("chips", [])
         # chips_played is a list of {"name": "wildcard", "time": "...", "event": 12}
@@ -2288,6 +2343,9 @@ def fetch_manager_team(manager_id, current_gw_id):
             "purchase_prices": purchase_prices,
             "selling_prices_api": selling_prices_api,
             "chips_remaining": chips_remaining,
+            "last_gw_id": last_gw_id,
+            "last_gw_points": last_gw_points,
+            "last_gw_rank": last_gw_rank,
         }, None
 
     except requests.exceptions.HTTPError:
@@ -3246,6 +3304,153 @@ def render_fdr(upcoming, teams):
     return " ".join(badges) if badges else "-"
 
 
+def render_landing_block(current_gw, df, team_data):
+    """Render the 'What's new for you' block above the tabs.
+
+    Three tiles: live deadline countdown, personalized welcome / last-GW
+    score, and a recommended captain. When no team is loaded, the second
+    tile becomes a CTA and the third falls back to the global top pick.
+    """
+    # --- Tile 1: deadline countdown ---
+    if current_gw and current_gw.get("deadline_time"):
+        deadline = datetime.fromisoformat(current_gw["deadline_time"].replace("Z", "+00:00"))
+        deadline_iso = deadline.isoformat()
+        deadline_str = deadline.strftime("%a %d %b · %H:%M")
+        gw_label = f"GW{current_gw.get('id', '?')}"
+        finished = bool(current_gw.get("finished"))
+    else:
+        deadline_iso = ""
+        deadline_str = "—"
+        gw_label = "GW —"
+        finished = False
+
+    countdown_id = f"dl-cd-{abs(hash(deadline_iso)) % 100000}"
+    if finished:
+        cd_html = '<div class="lt-value">Live</div>'
+    elif deadline_iso:
+        cd_html = (
+            f'<div class="lt-value lt-countdown" id="{countdown_id}" '
+            f'data-deadline="{deadline_iso}">…</div>'
+        )
+    else:
+        cd_html = '<div class="lt-value">—</div>'
+
+    tile_deadline = f"""
+    <div class="landing-tile lt-deadline">
+        <div class="lt-icon">⏱</div>
+        <div class="lt-label">{gw_label} Deadline</div>
+        {cd_html}
+        <div class="lt-sub">{deadline_str}</div>
+    </div>
+    """
+
+    # --- Tile 2: welcome / last-GW score ---
+    if team_data:
+        team_name = team_data.get("team_name", "Your team")
+        last_pts = team_data.get("last_gw_points")
+        last_rank = team_data.get("last_gw_rank")
+        overall_rank = team_data.get("overall_rank")
+        if last_pts is not None:
+            big = f"{last_pts} pts"
+            sub = (
+                f"Last GW · GW rank {last_rank:,}"
+                if isinstance(last_rank, int)
+                else "Last GW result"
+            )
+        else:
+            big = "Welcome back"
+            sub = (
+                f"Overall rank {overall_rank:,}"
+                if isinstance(overall_rank, int)
+                else "Squad loaded"
+            )
+        tile_welcome = f"""
+        <div class="landing-tile lt-welcome">
+            <div class="lt-icon">👋</div>
+            <div class="lt-label">{team_name}</div>
+            <div class="lt-value lt-welcome-value">{big}</div>
+            <div class="lt-sub">{sub}</div>
+        </div>
+        """
+    else:
+        tile_welcome = """
+        <div class="landing-tile lt-welcome lt-cta">
+            <div class="lt-icon">👋</div>
+            <div class="lt-label">Make it personal</div>
+            <div class="lt-value lt-welcome-value">Add your FPL ID</div>
+            <div class="lt-sub">See your team, captain pick, and transfer ideas</div>
+        </div>
+        """
+
+    # --- Tile 3: recommended captain ---
+    captain_pool = None
+    captain_label = "Top Captain Pick"
+    if team_data and df is not None and "squad_ids" in team_data:
+        squad = df[df["id"].isin(team_data["squad_ids"])]
+        if len(squad) > 0:
+            captain_pool = squad
+            captain_label = "Recommended Captain"
+    if captain_pool is None and df is not None:
+        # Fall back to global top by next-GW xPts among likely starters
+        captain_pool = df[df.get("minutes", 0) > 0] if "minutes" in df.columns else df
+
+    cap_name, cap_team, cap_xpts = "—", "", None
+    if captain_pool is not None and len(captain_pool) > 0 and "xpts_next_gw" in captain_pool.columns:
+        top = captain_pool.sort_values("xpts_next_gw", ascending=False).iloc[0]
+        cap_name = str(top.get("name", "—"))
+        cap_team = str(top.get("team", ""))
+        cap_xpts = float(top.get("xpts_next_gw", 0) or 0)
+
+    cap_big = cap_name
+    cap_sub = (
+        f"{cap_xpts:.1f} xPts · {cap_team}"
+        if cap_xpts is not None
+        else "—"
+    )
+    tile_captain = f"""
+    <div class="landing-tile lt-captain">
+        <div class="lt-icon">©</div>
+        <div class="lt-label">{captain_label}</div>
+        <div class="lt-value lt-captain-name">{cap_big}</div>
+        <div class="lt-sub">{cap_sub}</div>
+    </div>
+    """
+
+    block = f"""
+    <div class="landing-grid">
+        {tile_deadline}
+        {tile_welcome}
+        {tile_captain}
+    </div>
+    <script>
+    (function() {{
+        var el = document.getElementById("{countdown_id}");
+        if (!el) return;
+        var deadline = new Date(el.getAttribute("data-deadline")).getTime();
+        function tick() {{
+            var now = Date.now();
+            var diff = deadline - now;
+            if (diff <= 0) {{ el.textContent = "Live"; el.classList.add("lt-live"); return; }}
+            var d = Math.floor(diff / 86400000);
+            var h = Math.floor((diff % 86400000) / 3600000);
+            var m = Math.floor((diff % 3600000) / 60000);
+            var s = Math.floor((diff % 60000) / 1000);
+            var parts = [];
+            if (d) parts.push(d + "d");
+            parts.push(String(h).padStart(2,"0") + "h");
+            parts.push(String(m).padStart(2,"0") + "m");
+            if (!d) parts.push(String(s).padStart(2,"0") + "s");
+            el.textContent = parts.join(" ");
+            if (d === 0 && h < 6) el.classList.add("lt-urgent");
+        }}
+        tick();
+        setInterval(tick, 1000);
+    }})();
+    </script>
+    """
+    st.markdown(block, unsafe_allow_html=True)
+
+
 # ============================================================
 # MAIN APP
 # ============================================================
@@ -3341,6 +3546,25 @@ def main():
             </span>
         </div>""", unsafe_allow_html=True)
 
+    # === Landing block (above tabs): personalized snapshot for returning visitors ===
+    # Auto-load team data if fpl_id is already known (from session or URL query param)
+    _saved_fpl_id = st.session_state.get("fpl_id", "")
+    if not _saved_fpl_id:
+        _qp_id = st.query_params.get("fpl_id", "") if hasattr(st, "query_params") else ""
+        if _qp_id and str(_qp_id).strip().isdigit():
+            st.session_state["fpl_id"] = str(_qp_id).strip()
+            _saved_fpl_id = st.session_state["fpl_id"]
+    _team_data_for_landing = st.session_state.get("team_data")
+    if _saved_fpl_id and not _team_data_for_landing and current_gw:
+        try:
+            _td, _ = fetch_manager_team(int(_saved_fpl_id), current_gw["id"])
+            if _td:
+                st.session_state["team_data"] = _td
+                _team_data_for_landing = _td
+        except Exception:
+            _team_data_for_landing = None
+    render_landing_block(current_gw, df, _team_data_for_landing)
+
     # === Tabs ===
     tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         "🏠 My Team", "📊 Dashboard", "👥 Player Projections",
@@ -3382,6 +3606,11 @@ def main():
 
         if load_team and fpl_id:
             st.session_state["fpl_id"] = fpl_id
+            # Persist in the URL so the returning visit auto-loads
+            try:
+                st.query_params["fpl_id"] = fpl_id.strip()
+            except Exception:
+                pass
 
         if fpl_id and fpl_id.strip().isdigit():
             manager_id = int(fpl_id.strip())
