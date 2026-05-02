@@ -1412,21 +1412,36 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
             else:
                 availability = 0.0
 
-        # Expected minutes: separate "minutes per appearance" from "probability of
-        # appearing." Multiplying season avg_mins_per_gw by availability double-counts
-        # rotation, since avg_mins_per_gw already includes 0-min benched weeks.
-        # Correct formula: E[mins] = E[mins | starts] * P(starts).
+        # Expected minutes: E[mins] = E[mins | played] * P(plays). Three branches:
+        #   1. rot exists with recent appearances → use per-appearance mins × P(start).
+        #   2. rot exists but the player hasn't appeared in the last 7 GWs →
+        #      they're effectively dropped. expected_mins = 0 (was the regression bug:
+        #      previously fell back to avg_mins_per_gw, leaving benched players with
+        #      inflated projections from early-season minutes).
+        #   3. No rot data (early season / thin history) → heuristic fallback using
+        #      season average × availability category.
         appeared_mins = (rot or {}).get("avg_mins_when_played", 0)
         if rot and appeared_mins > 0:
             # Blend recent per-appearance mins with season per-appearance baseline
-            season_appeared = (mins / max(p.get("starts", 0) or 1, 1))
+            season_appeared = mins / max(p.get("starts", 0) or 1, 1)
             mins_per_start = appeared_mins * 0.7 + season_appeared * 0.3
             expected_mins = min(mins_per_start * availability, 90)
+        elif rot:
+            # Hasn't appeared in the recent window — out of the picture
+            expected_mins = 0.0
         else:
-            # No recent appearance data: fall back to season average (which already
-            # encodes the historical start rate). Don't multiply by availability —
-            # that would double-discount.
-            expected_mins = min(avg_mins_per_gw, 90)
+            # No rotation data — heuristic fallback
+            expected_mins = min(avg_mins_per_gw * availability, 90)
+
+        # Fringe-player cliff: if the recent record shows almost no starts AND mostly
+        # absent, hard-cap expected minutes regardless of season-history inertia.
+        # Catches benched fringe forwards (Awoniyi-type) and backup keepers whose
+        # season averages still look respectable from earlier starts.
+        if rot:
+            _start_rate = rot.get("start_rate", 0)
+            _appear_rate = rot.get("appear_rate", 0)
+            if _start_rate < 0.15 and _appear_rate < 0.5:
+                expected_mins = min(expected_mins, 5.0)
 
         # Convert to "expected 90s" for scaling xG/xA
         expected_90s = expected_mins / 90.0
@@ -1458,10 +1473,12 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
         if form_data and form_data.get("form_gws", 0) >= 3:
             form_xg = form_data["xg_form_per90"]
             form_xa = form_data["xa_form_per90"]
-            # Blend: 60% recent form, 40% season average
-            # (recent form is more predictive but noisier)
-            xg_per90 = form_xg * 0.6 + season_xg * 0.4
-            xa_per90 = form_xa * 0.6 + season_xa * 0.4
+            # Blend: 55% recent form, 45% season average.
+            # Recent form is more predictive but noisier — slightly tilted towards
+            # form, but conservative enough that hot streaks don't dominate the
+            # projection (over/underperformance regression below catches the rest).
+            xg_per90 = form_xg * 0.55 + season_xg * 0.45
+            xa_per90 = form_xa * 0.55 + season_xa * 0.45
         else:
             xg_per90 = season_xg
             xa_per90 = season_xa
@@ -1755,9 +1772,17 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
                 defcon_xpts = 2.0 * defcon_prob * full_game_prob
                 xpts += defcon_xpts
 
-            # Accumulate xPts — important for DGWs where a player has 2 fixtures in same GW
+            # Accumulate xPts — important for DGWs where a player has 2 fixtures
+            # in the same GW. Apply a 10% fatigue/rotation penalty to second-and-later
+            # fixtures: in practice DGW players are subbed off earlier, sometimes
+            # rotated for fitness, and rarely sustain peak intensity across both
+            # matches. Without this the model treats DGWs as fully independent
+            # fixture rolls and over-projects premium attackers.
             gw_xpts_so_far = player_gw_xpts.get(gw, 0)
-            player_gw_xpts[gw] = round(gw_xpts_so_far + max(xpts, 0), 2)
+            fixture_xpts = max(xpts, 0)
+            if gw_xpts_so_far > 0:
+                fixture_xpts *= 0.90
+            player_gw_xpts[gw] = round(gw_xpts_so_far + fixture_xpts, 2)
 
             # Store breakdown for this fixture
             if pid not in xpts_breakdown:
@@ -2226,6 +2251,14 @@ def fetch_manager_team(manager_id, current_gw_id):
                 gw_number = gw_data.get("event", 0)
                 transfers_made = gw_data.get("event_transfers", 0)
                 transfers_cost = gw_data.get("event_transfers_cost", 0)
+
+                # Stop at the in-progress (or later) GW. We want `ft` to represent
+                # the FT count entering current_gw_id, which is the value AFTER
+                # processing every completed GW strictly before it. If we process
+                # the in-progress GW too, `ft` advances one GW too far and the user
+                # sees the count for the GW after the one they're planning for.
+                if gw_number >= current_gw_id:
+                    break
 
                 # Skip the GW the team was created — no FT banking on first GW
                 if gw_number <= started_event:
