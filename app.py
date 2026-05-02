@@ -279,35 +279,89 @@ GK_COLOURS = {
 }
 
 
-def make_shirt_svg(team_short, xpts_text, is_gk=False, is_captain=False, width=56, height=56, player_name=""):
-    """Generate an inline SVG circular badge with team colours and xPts."""
-    if is_gk:
-        primary, secondary, text_col = GK_COLOURS.get(team_short, GK_COLOURS["default"])
-    else:
-        primary, secondary, text_col = TEAM_COLOURS.get(team_short, ("#666666", "#FFFFFF", "#FFFFFF"))
+def make_shirt_svg(team_short, xpts_text, is_gk=False, is_captain=False, width=56, height=56, player_name="", team_code=0):
+    """Render the player's kit with an xPts overlay.
 
-    # Get short surname (max 8 chars)
+    FPL: pulls the official kit PNG from the Premier League CDN (same image FPL itself uses).
+    Other leagues / missing code: falls back to a jersey-shaped SVG drawn from TEAM_COLOURS.
+    """
     short_name = ""
     if player_name:
         parts = player_name.strip().split()
         short_name = parts[-1][:8] if parts else ""
 
-    r = min(width, height) / 2 - 2
-    cx = width / 2
-    cy = height / 2
-
-    cap = ""
+    cap_html = ""
     if is_captain:
-        cap = (f'<circle cx="{width-5}" cy="7" r="6.5" fill="#FFD700" stroke="#1a1e2e" stroke-width="1"/>'
-               f'<text x="{width-5}" y="10.5" text-anchor="middle" font-size="8" font-weight="bold" fill="#000" font-family="Arial,sans-serif">C</text>')
+        cap_html = (
+            f'<span style="position:absolute;top:-3px;right:-3px;width:15px;height:15px;border-radius:50%;'
+            f'background:#FFD700;border:1.5px solid #0a0e17;color:#000;font-size:9px;font-weight:800;'
+            f'display:flex;align-items:center;justify-content:center;font-family:Inter,Arial,sans-serif;'
+            f'line-height:1;box-shadow:0 1px 3px rgba(0,0,0,0.4);z-index:3;">C</span>'
+        )
 
-    # Build as one line to avoid Streamlit HTML parsing issues
+    # Official FPL kit image when we have an FPL team code
+    if team_code and LC.get("short_name") == "FPL":
+        suffix = "_1" if is_gk else ""
+        url = f"https://fantasy.premierleague.com/dist/img/shirts/standard/shirt_{team_code}{suffix}-66.png"
+        xpts_pill = (
+            f'<span style="position:absolute;bottom:-1px;left:50%;transform:translateX(-50%);'
+            f'background:rgba(10,14,23,0.94);color:#fff;font-size:0.66rem;font-weight:800;'
+            f'padding:1px 7px;border-radius:8px;border:1px solid #2a3550;line-height:1.25;'
+            f'white-space:nowrap;font-family:Inter,Arial,sans-serif;letter-spacing:-0.2px;z-index:2;">'
+            f'{xpts_text}</span>'
+        )
+        return (
+            f'<div style="position:relative;width:{width}px;height:{height}px;display:inline-block;">'
+            f'<img src="{url}" width="{width}" height="{height}" alt="{team_short} kit" '
+            f'loading="lazy" style="display:block;object-fit:contain;'
+            f'filter:drop-shadow(0 2px 3px rgba(0,0,0,0.35));" />'
+            f'{cap_html}{xpts_pill}</div>'
+        )
+
+    # Fallback: stylized jersey silhouette in team colours
+    if is_gk:
+        primary, secondary, text_col = GK_COLOURS.get(team_short, GK_COLOURS["default"])
+    else:
+        primary, secondary, text_col = TEAM_COLOURS.get(team_short, ("#666666", "#FFFFFF", "#FFFFFF"))
+
+    w, h = width, height
+    body_w = w * 0.60
+    body_x = (w - body_w) / 2
+    shoulder_y = h * 0.20
+    sleeve_y = h * 0.50
+    hem_y = h * 0.94
+    neck_w = w * 0.18
+    neck_x = (w - neck_w) / 2
+    sl_out = w * 0.14
+    cap_svg = ""
+    if is_captain:
+        cap_svg = (
+            f'<circle cx="{w-7}" cy="7" r="6.5" fill="#FFD700" stroke="#0a0e17" stroke-width="1"/>'
+            f'<text x="{w-7}" y="10.5" text-anchor="middle" font-size="8" font-weight="bold" '
+            f'fill="#000" font-family="Arial,sans-serif">C</text>'
+        )
+    jersey_path = (
+        f'M {body_x} {shoulder_y} '
+        f'L {neck_x} {shoulder_y} '
+        f'Q {w/2} {shoulder_y + h*0.10} {neck_x + neck_w} {shoulder_y} '
+        f'L {body_x + body_w} {shoulder_y} '
+        f'L {body_x + body_w + sl_out} {shoulder_y + h*0.06} '
+        f'L {body_x + body_w + sl_out*0.55} {sleeve_y} '
+        f'L {body_x + body_w} {shoulder_y + h*0.30} '
+        f'L {body_x + body_w} {hem_y} '
+        f'L {body_x} {hem_y} '
+        f'L {body_x} {shoulder_y + h*0.30} '
+        f'L {body_x - sl_out*0.55} {sleeve_y} '
+        f'L {body_x - sl_out} {shoulder_y + h*0.06} Z'
+    )
     svg = (
-        f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg">'
-        f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="{primary}" stroke="{secondary}" stroke-width="2"/>'
-        f'<text x="{cx}" y="{cy-2}" text-anchor="middle" font-size="8" font-weight="400" fill="{text_col}" opacity="0.75" font-family="Arial,sans-serif">{short_name}</text>'
-        f'<text x="{cx}" y="{cy+12}" text-anchor="middle" font-size="13" font-weight="700" fill="{text_col}" font-family="Arial,sans-serif">{xpts_text}</text>'
-        f'{cap}'
+        f'<svg width="{w}" height="{h}" viewBox="0 0 {w} {h}" xmlns="http://www.w3.org/2000/svg">'
+        f'<path d="{jersey_path}" fill="{primary}" stroke="{secondary}" stroke-width="1.5" stroke-linejoin="round"/>'
+        f'<text x="{w/2}" y="{h*0.56}" text-anchor="middle" font-size="8" font-weight="400" '
+        f'fill="{text_col}" opacity="0.7" font-family="Arial,sans-serif">{short_name}</text>'
+        f'<text x="{w/2}" y="{h*0.80}" text-anchor="middle" font-size="13" font-weight="700" '
+        f'fill="{text_col}" font-family="Arial,sans-serif">{xpts_text}</text>'
+        f'{cap_svg}'
         f'</svg>'
     )
     return svg
@@ -1675,6 +1729,7 @@ def enrich_data(bootstrap, fixtures, team_odds):
             "team_id": p["team"],
             "team": td.get("short_name", "???"),
             "team_name": td.get("name", "???"),
+            "team_code": td.get("code", 0),
             "pos_id": p["element_type"],
             "pos": POS_MAP.get(p["element_type"], "?"),
             "price": price,
@@ -3182,7 +3237,7 @@ def main():
                                 is_gk = (p["pos_id"] == 1)
                                 is_cap = p.get("is_captain", False)
                                 cap_badge = " (C)" if is_cap else (" (V)" if p.get("is_vice", False) else "")
-                                shirt_svg = make_shirt_svg(p["team"], f"{p['xpts_next_gw']:.1f}", is_gk=is_gk, is_captain=is_cap, player_name=p.get("name", ""))
+                                shirt_svg = make_shirt_svg(p["team"], f"{p['xpts_next_gw']:.1f}", is_gk=is_gk, is_captain=is_cap, player_name=p.get("name", ""), team_code=int(p.get("team_code", 0) or 0))
                                 with cols[i]:
                                     html = f'<div style="text-align:center;">{shirt_svg}<div class="pitch-name">{p["name"]}{cap_badge}</div><div class="pitch-price">£{p["price"]:.1f}m · {p["xpts_total"]:.1f} xPts</div></div>'
                                     st.markdown(html, unsafe_allow_html=True)
@@ -3192,7 +3247,7 @@ def main():
                         bcols = st.columns(max(len(bench), 1))
                         for i, (_, p) in enumerate(bench.iterrows()):
                             is_gk = (p["pos_id"] == 1)
-                            shirt_svg = make_shirt_svg(p["team"], f"{p['xpts_next_gw']:.1f}", is_gk=is_gk, width=44, height=44, player_name=p.get("name", ""))
+                            shirt_svg = make_shirt_svg(p["team"], f"{p['xpts_next_gw']:.1f}", is_gk=is_gk, width=44, height=44, player_name=p.get("name", ""), team_code=int(p.get("team_code", 0) or 0))
                             with bcols[i]:
                                 html = f'<div style="text-align:center;opacity:0.6;">{shirt_svg}<div class="pitch-name">{p["name"]}</div><div class="pitch-price">{p["pos"]} · £{p["price"]:.1f}m</div></div>'
                                 st.markdown(html, unsafe_allow_html=True)
@@ -3819,7 +3874,7 @@ def main():
                                                     is_gk = (p["pos_id"] == 1)
                                                     is_cap = (captain is not None and p["id"] == captain.get("id"))
                                                     gw_xpts = p.get("xpts_gw", 0)
-                                                    shirt_svg = make_shirt_svg(p.get("team", "???"), f"{gw_xpts:.1f}", is_gk=is_gk, is_captain=is_cap, player_name=p.get("name", ""))
+                                                    shirt_svg = make_shirt_svg(p.get("team", "???"), f"{gw_xpts:.1f}", is_gk=is_gk, is_captain=is_cap, player_name=p.get("name", ""), team_code=int(p.get("team_code", 0) or 0))
                                                     with cols[ci]:
                                                         html = f'<div style="text-align:center;">{shirt_svg}<div class="pitch-name">{p["name"]}</div><div class="pitch-price">£{p["price"]:.1f}m</div></div>'
                                                         st.markdown(html, unsafe_allow_html=True)
@@ -4418,7 +4473,7 @@ def main():
                             cols = st.columns(max(len(pp), 1))
                             for i, (_, p) in enumerate(pp.iterrows()):
                                 is_gk = (p["pos_id"] == 1)
-                                shirt_svg = make_shirt_svg(p["team"], f"{p['xpts_next_gw']:.1f}", is_gk=is_gk, player_name=p.get("name", ""))
+                                shirt_svg = make_shirt_svg(p["team"], f"{p['xpts_next_gw']:.1f}", is_gk=is_gk, player_name=p.get("name", ""), team_code=int(p.get("team_code", 0) or 0))
                                 with cols[i]:
                                     html = f'<div style="text-align:center;">{shirt_svg}<div class="pitch-name">{p["name"]}</div><div class="pitch-price">£{p["price"]:.1f}m · {p["form_str"]}</div></div>'
                                     st.markdown(html, unsafe_allow_html=True)
@@ -4428,7 +4483,7 @@ def main():
                     bcols = st.columns(len(bench))
                     for i, (_, p) in enumerate(bench.iterrows()):
                         is_gk = (p["pos_id"] == 1)
-                        shirt_svg = make_shirt_svg(p["team"], f"{p['xpts_next_gw']:.1f}", is_gk=is_gk, width=44, height=44, player_name=p.get("name", ""))
+                        shirt_svg = make_shirt_svg(p["team"], f"{p['xpts_next_gw']:.1f}", is_gk=is_gk, width=44, height=44, player_name=p.get("name", ""), team_code=int(p.get("team_code", 0) or 0))
                         with bcols[i]:
                             html = f'<div style="text-align:center;opacity:0.65;">{shirt_svg}<div class="pitch-name">{p["name"]}</div><div class="pitch-price">{p["pos"]} · £{p["price"]:.1f}m</div></div>'
                             st.markdown(html, unsafe_allow_html=True)
