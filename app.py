@@ -162,8 +162,25 @@ st.set_page_config(
     page_title="Datumly - FPL Analytics",
     page_icon="favicon.svg",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
+
+# ============================================================
+# NAVIGATION
+# ============================================================
+# Sidebar-driven router. Each entry: (key, emoji, label).
+# `st.session_state["active_nav"]` is the single source of truth — the sidebar
+# nav writes it on click; the main body reads it to decide what to render.
+NAV_ITEMS = [
+    ("my_team", "🏠", "My Team"),
+    ("dashboard", "📊", "Dashboard"),
+    ("players", "👥", "Player Projections"),
+    ("optimal", "⭐", "Optimal Squad"),
+    ("transfers", "🔄", "Transfer Planner"),
+    ("fixtures", "📅", "Fixtures"),
+    ("backtest", "🔬", "Backtest"),
+    ("chips", "🎯", "Chip Strategy"),
+]
 
 # League selector (persisted in session state)
 if "active_league" not in st.session_state:
@@ -390,28 +407,28 @@ st.markdown("""
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 <style>
     :root {
-        --bg: #07090f;
-        --bg-grad-1: #0a0e17;
-        --bg-grad-2: #0d111c;
-        --surface: #111827;
-        --surface-2: #161f33;
-        --surface-3: #1a2236;
-        --border: #1f2940;
-        --border-strong: #2a3550;
-        --border-focus: #3a4670;
-        --text: #e7ecf4;
+        /* Direction B — calm product palette. Flat surfaces, restrained pink. */
+        --bg: #0a0a0b;
+        --bg-2: #08080a;
+        --surface: rgba(255,255,255,0.02);
+        --surface-2: rgba(255,255,255,0.04);
+        --surface-hover: rgba(255,255,255,0.03);
+        --border: rgba(255,255,255,0.06);
+        --border-strong: rgba(255,255,255,0.10);
+        --border-focus: rgba(255,255,255,0.16);
+        --text: #ffffff;
+        --text-2: #e7ecf4;
         --text-muted: #9aa5c0;
         --text-faint: #5a6580;
-        --brand: #f02d6e;
-        --brand-2: #ff6b8a;
-        --brand-grad: linear-gradient(135deg, #f02d6e 0%, #e8456e 50%, #ff6b8a 100%);
-        --accent: #38bdf8;
+        /* Desaturated brand pink — kept as a focal accent, used sparingly */
+        --brand: #e94e7e;
+        --brand-2: #ff7ba0;
+        --brand-soft: rgba(233,78,126,0.10);
+        --brand-border: rgba(233,78,126,0.25);
         --good: #34d399;
         --warn: #fbbf24;
         --bad: #f87171;
-        --shadow-sm: 0 1px 2px rgba(0,0,0,0.25);
-        --shadow-md: 0 4px 12px rgba(0,0,0,0.35);
-        --shadow-glow: 0 0 0 1px rgba(240,45,110,0.18), 0 8px 24px rgba(240,45,110,0.12);
+        --accent: #38bdf8;
     }
 
     /* ---- Base ---- */
@@ -420,150 +437,192 @@ st.markdown("""
         -webkit-font-smoothing: antialiased;
         -moz-osx-font-smoothing: grayscale;
     }
-    .stApp {
-        background:
-            radial-gradient(1200px 600px at 12% -10%, rgba(240,45,110,0.07), transparent 60%),
-            radial-gradient(900px 500px at 95% 0%, rgba(56,189,248,0.05), transparent 60%),
-            linear-gradient(180deg, var(--bg-grad-1) 0%, var(--bg) 100%);
-        color: var(--text);
-    }
+    .stApp { background: var(--bg); color: var(--text-2); }
     header[data-testid="stHeader"] {
-        background: rgba(7,9,15,0.7);
+        background: rgba(10,10,11,0.78);
         backdrop-filter: saturate(160%) blur(14px);
         border-bottom: 1px solid var(--border);
     }
-    /* Tabular figures everywhere — stat-heavy app */
-    table, code, kbd, .stDataFrame, .metric-value, .metric-sub, .gw-num,
-    .pitch-price, .pitch-shirt-xpts, .badge, .fdr-1, .fdr-2, .fdr-3, .fdr-4, .fdr-5 {
+    table, code, kbd, .stDataFrame, .metric-value, .metric-sub,
+    .pitch-price, .pitch-shirt-xpts, .badge, .fdr-1, .fdr-2, .fdr-3, .fdr-4, .fdr-5,
+    .lt-value, .lt-sub, .status-pill {
         font-variant-numeric: tabular-nums;
         font-feature-settings: "tnum" 1, "ss01" 1;
     }
-    /* Custom scrollbar */
     ::-webkit-scrollbar { width: 10px; height: 10px; }
     ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: #1c2540; border-radius: 8px; border: 2px solid var(--bg); }
-    ::-webkit-scrollbar-thumb:hover { background: #2a3658; }
-    /* Selection */
-    ::selection { background: rgba(240,45,110,0.35); color: #fff; }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.06); border-radius: 8px; border: 2px solid var(--bg); }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.12); }
+    ::selection { background: rgba(233,78,126,0.30); color: #fff; }
 
-    /* ---- Product header ---- */
-    .app-header {
-        display: flex; align-items: baseline; gap: 0.75rem; flex-wrap: wrap;
-        padding: 0.4rem 0 0.9rem 0;
+    /* Hide the (now-unused) horizontal tab strip — we navigate via sidebar */
+    .stTabs [data-baseweb="tab-list"] { display: none !important; }
+    .stTabs [data-baseweb="tab-highlight"] { display: none !important; }
+
+    /* ---- Sidebar (the new nav) ---- */
+    [data-testid="stSidebar"] {
+        background: var(--bg-2) !important;
+        border-right: 1px solid var(--border) !important;
+        min-width: 240px !important;
+    }
+    [data-testid="stSidebar"] > div:first-child { padding-top: 8px; }
+    [data-testid="stSidebar"] [data-testid="stSidebarContent"] { padding: 12px 14px; }
+    .sb-brand {
+        display: flex; align-items: center;
+        padding: 6px 6px 18px;
         border-bottom: 1px solid var(--border);
-        margin-bottom: 1.1rem;
+        margin-bottom: 14px;
     }
-    .main-title {
-        background: var(--brand-grad);
-        -webkit-background-clip: text; background-clip: text;
-        -webkit-text-fill-color: transparent; color: transparent;
-        font-size: 1.85rem; font-weight: 800;
-        letter-spacing: -0.03em; line-height: 1; margin: 0;
+    .sb-brand svg { height: 32px; width: auto; }
+    .sb-section {
+        font-size: 0.62rem; font-weight: 600; letter-spacing: 0.14em;
+        text-transform: uppercase; color: var(--text-faint);
+        padding: 14px 8px 8px;
     }
-    .sub-title {
-        color: var(--text-muted); font-size: 0.82rem; margin: 0;
-        font-weight: 500; letter-spacing: 0.01em;
+    .sb-spacer { height: 14px; border-top: 1px solid var(--border); margin-top: 14px; }
+    .sb-nav-item {
+        display: flex; align-items: center;
+        padding: 8px 12px;
+        font-size: 0.86rem; font-weight: 500;
+        color: var(--text);
+        border-radius: 6px;
+        margin: 2px 0;
+        background: var(--surface-2);
+        cursor: default;
     }
-    .app-tag {
-        display: inline-flex; align-items: center; gap: 5px;
-        font-size: 0.62rem; font-weight: 700; letter-spacing: 0.12em;
-        text-transform: uppercase; color: var(--brand-2);
-        background: rgba(240,45,110,0.10);
-        border: 1px solid rgba(240,45,110,0.28);
-        padding: 3px 8px; border-radius: 999px; line-height: 1;
+    .sb-nav-item.active { font-weight: 600; }
+    [data-testid="stSidebar"] .stButton > button {
+        background: transparent !important;
+        border: none !important;
+        color: var(--text-muted) !important;
+        font-weight: 500 !important;
+        font-size: 0.86rem !important;
+        text-align: left !important;
+        justify-content: flex-start !important;
+        padding: 8px 12px !important;
+        margin: 1px 0 !important;
+        border-radius: 6px !important;
+        box-shadow: none !important;
+        transition: background 100ms ease, color 100ms ease !important;
     }
-    .app-tag::before {
-        content: ""; width: 5px; height: 5px; border-radius: 50%;
-        background: var(--brand-2); box-shadow: 0 0 6px var(--brand);
+    [data-testid="stSidebar"] .stButton > button:hover {
+        background: var(--surface-2) !important;
+        color: var(--text) !important;
+        transform: none !important;
+    }
+    [data-testid="stSidebar"] [data-baseweb="select"] > div {
+        background: var(--surface-2) !important;
+        border: 1px solid var(--border) !important;
+        border-radius: 6px !important;
+        font-size: 0.84rem !important;
     }
 
-    /* ---- Metric cards ---- */
+    /* ---- Slim top status strip ---- */
+    .status-strip {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 4px 0 18px;
+        margin: 0 0 22px;
+        border-bottom: 1px solid var(--border);
+        gap: 16px; flex-wrap: wrap;
+    }
+    .status-h1 {
+        font-size: 1.4rem; font-weight: 600;
+        letter-spacing: -0.025em;
+        color: var(--text);
+        line-height: 1.2;
+    }
+    .status-pills { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .status-pill {
+        display: inline-flex; align-items: center; gap: 6px;
+        padding: 4px 10px;
+        border-radius: 999px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        color: var(--text-muted);
+        font-size: 0.74rem; font-weight: 500;
+    }
+    .status-pill.subtle { color: var(--text-faint); }
+    .status-pill .dot {
+        width: 6px; height: 6px; border-radius: 50%;
+        background: var(--good);
+    }
+
+    /* ---- Cards ---- */
     .metric-card {
-        background: linear-gradient(180deg, var(--surface) 0%, #0e1522 100%);
-        border: 1px solid var(--border-strong);
-        border-radius: 14px; padding: 1.05rem 1rem;
-        text-align: center; position: relative; overflow: hidden;
-        transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px; padding: 16px 18px;
+        text-align: left;
+        transition: border-color 140ms ease, background 140ms ease;
     }
-    .metric-card::before {
-        content:""; position:absolute; left:0; right:0; top:0; height:1px;
-        background: linear-gradient(90deg, transparent, rgba(240,45,110,0.45), transparent);
-        opacity: 0; transition: opacity 160ms ease;
-    }
-    .metric-card:hover { transform: translateY(-1px); border-color: var(--border-focus); box-shadow: var(--shadow-md); }
-    .metric-card:hover::before { opacity: 1; }
+    .metric-card:hover { border-color: var(--border-strong); background: var(--surface-hover); }
     .metric-label {
-        color: var(--text-faint); font-size: 0.66rem; font-weight: 600;
-        text-transform: uppercase; letter-spacing: 0.12em; margin-bottom: 4px;
+        color: var(--text-faint); font-size: 0.7rem; font-weight: 500;
+        margin-bottom: 6px; letter-spacing: 0.02em;
     }
     .metric-value {
-        color: var(--text); font-size: 1.7rem; font-weight: 700;
-        letter-spacing: -0.02em; line-height: 1.1;
+        color: var(--text); font-size: 1.5rem; font-weight: 600;
+        letter-spacing: -0.02em; line-height: 1.15;
     }
-    .metric-sub { color: var(--text-muted); font-size: 0.74rem; margin-top: 3px; font-weight: 500; }
+    .metric-sub { color: var(--text-muted); font-size: 0.78rem; margin-top: 4px; font-weight: 400; }
 
     /* ---- FDR chips ---- */
     .fdr-1, .fdr-2, .fdr-3, .fdr-4, .fdr-5 {
         padding: 2px 8px; border-radius: 6px;
-        font-size: 0.72rem; font-weight: 700;
+        font-size: 0.72rem; font-weight: 600;
         display: inline-block; margin: 1px;
         border: 1px solid transparent;
     }
-    .fdr-1 { background: rgba(6,95,70,0.55);  color: #6ee7b7; border-color: rgba(110,231,183,0.18); }
-    .fdr-2 { background: rgba(20,83,45,0.55); color: #86efac; border-color: rgba(134,239,172,0.16); }
-    .fdr-3 { background: rgba(120,53,15,0.55); color: #fcd34d; border-color: rgba(252,211,77,0.16); }
-    .fdr-4 { background: rgba(124,45,18,0.6); color: #fdba74; border-color: rgba(253,186,116,0.18); }
-    .fdr-5 { background: rgba(127,29,29,0.6); color: #fca5a5; border-color: rgba(252,165,165,0.18); }
+    .fdr-1 { background: rgba(6,95,70,0.45);  color: #6ee7b7; border-color: rgba(110,231,183,0.16); }
+    .fdr-2 { background: rgba(20,83,45,0.45); color: #86efac; border-color: rgba(134,239,172,0.14); }
+    .fdr-3 { background: rgba(120,53,15,0.45); color: #fcd34d; border-color: rgba(252,211,77,0.14); }
+    .fdr-4 { background: rgba(124,45,18,0.55); color: #fdba74; border-color: rgba(253,186,116,0.16); }
+    .fdr-5 { background: rgba(127,29,29,0.55); color: #fca5a5; border-color: rgba(252,165,165,0.16); }
 
-    /* ---- Cards & panels ---- */
+    /* ---- Transfer cards ---- */
     .transfer-card {
-        background: linear-gradient(180deg, var(--surface-3) 0%, #141b2c 100%);
-        border: 1px solid var(--border-strong);
-        border-radius: 12px; padding: 0.8rem 1rem;
-        margin-bottom: 0.45rem;
-        transition: border-color 140ms ease, transform 140ms ease;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px; padding: 12px 16px;
+        margin-bottom: 6px;
+        transition: border-color 140ms ease;
     }
-    .transfer-card:hover { border-color: var(--border-focus); transform: translateY(-1px); }
-    .transfer-out { color: var(--bad); font-weight: 600; }
-    .transfer-in { color: var(--good); font-weight: 600; }
-    .transfer-arrow { color: var(--accent); font-size: 1.1rem; }
+    .transfer-card:hover { border-color: var(--border-strong); }
+    .transfer-out { color: var(--bad); font-weight: 500; }
+    .transfer-in { color: var(--good); font-weight: 500; }
+    .transfer-arrow { color: var(--accent); font-size: 1.05rem; }
 
-    /* ---- GW bar ---- */
+    /* ---- Legacy GW bar (kept for any stragglers) ---- */
     .gw-bar {
-        background: linear-gradient(180deg, var(--surface) 0%, #0e1522 100%);
-        border: 1px solid var(--border-strong);
-        border-radius: 14px;
-        padding: 0.7rem 1.15rem;
-        display: flex; align-items: center; gap: 1rem;
-        margin-bottom: 1.1rem; flex-wrap: wrap;
-        box-shadow: var(--shadow-sm);
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 8px 14px;
+        display: flex; align-items: center; gap: 12px;
+        margin-bottom: 14px; flex-wrap: wrap;
+        font-size: 0.84rem;
     }
-    .gw-num {
-        background: var(--brand-grad);
-        -webkit-background-clip: text; background-clip: text;
-        -webkit-text-fill-color: transparent; color: transparent;
-        font-size: 1.05rem; font-weight: 800; letter-spacing: -0.01em;
-    }
-    .gw-deadline { color: var(--text-muted); font-size: 0.78rem; font-weight: 500; }
+    .gw-num { color: var(--text); font-weight: 600; letter-spacing: -0.01em; }
+    .gw-deadline { color: var(--text-muted); font-size: 0.78rem; }
 
-    /* ---- Badges & source tags ---- */
+    /* ---- Pills / badges ---- */
     .badge {
         font-size: 0.66rem; padding: 3px 9px; border-radius: 999px;
-        font-weight: 700; letter-spacing: 0.02em;
+        font-weight: 600; letter-spacing: 0.02em;
         border: 1px solid transparent;
     }
-    .badge-green  { background: rgba(52,211,153,0.12); color: #34d399; border-color: rgba(52,211,153,0.25); }
-    .badge-yellow { background: rgba(251,191,36,0.12); color: #fbbf24; border-color: rgba(251,191,36,0.25); }
-    .badge-blue   { background: rgba(56,189,248,0.12); color: #38bdf8; border-color: rgba(56,189,248,0.25); }
+    .badge-green  { background: rgba(52,211,153,0.10); color: #34d399; border-color: rgba(52,211,153,0.22); }
+    .badge-yellow { background: rgba(251,191,36,0.10); color: #fbbf24; border-color: rgba(251,191,36,0.22); }
+    .badge-blue   { background: rgba(56,189,248,0.10); color: #38bdf8; border-color: rgba(56,189,248,0.22); }
 
     .source-tag {
         display: inline-block; font-size: 0.6rem; padding: 2px 7px; border-radius: 4px;
-        font-weight: 700; letter-spacing: 0.04em; margin-left: 6px;
+        font-weight: 600; letter-spacing: 0.04em; margin-left: 6px;
         text-transform: uppercase;
     }
-    .src-fpl   { background: rgba(56,189,248,0.13); color: #38bdf8; }
-    .src-odds  { background: rgba(251,191,36,0.13); color: #fbbf24; }
-    .src-model { background: rgba(167,139,250,0.14); color: #a78bfa; }
+    .src-fpl   { background: rgba(56,189,248,0.10); color: #38bdf8; }
+    .src-odds  { background: rgba(251,191,36,0.10); color: #fbbf24; }
+    .src-model { background: rgba(167,139,250,0.10); color: #a78bfa; }
 
     /* ---- Pitch ---- */
     .pitch-row-label {
@@ -574,165 +633,114 @@ st.markdown("""
     }
     .pitch-shirt-container { display: inline-flex; flex-direction: column; align-items: center; position: relative; margin: 0 auto; }
     .pitch-shirt-xpts { position: absolute; top: 18px; left: 50%; transform: translateX(-50%); font-weight: 700; font-size: 0.72rem; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,0.5); z-index: 2; }
-    .pitch-name { font-size: 0.72rem; font-weight: 600; color: var(--text); margin-top: 5px; line-height: 1.15; }
-    .pitch-price { font-size: 0.6rem; color: var(--text-faint); font-weight: 500; }
+    .pitch-name { font-size: 0.72rem; font-weight: 500; color: var(--text); margin-top: 5px; line-height: 1.15; }
+    .pitch-price { font-size: 0.6rem; color: var(--text-faint); font-weight: 400; }
 
-    /* ---- Section headers ---- */
+    /* ---- Section headers (within tab content) ---- */
     .section-header {
-        font-size: 1.02rem; font-weight: 700; color: var(--text);
+        font-size: 0.95rem; font-weight: 600; color: var(--text);
         letter-spacing: -0.01em; line-height: 1.3;
-        margin: 1.4rem 0 0.7rem;
-        padding-left: 10px;
-        border-left: 3px solid var(--brand);
+        margin: 22px 0 10px;
     }
 
-    /* ---- Streamlit overrides ---- */
-    /* Tabs */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 2px; border-bottom: 1px solid var(--border);
-        background: transparent;
-    }
-    .stTabs [data-baseweb="tab"] {
-        background: transparent !important;
-        color: var(--text-muted) !important;
-        font-weight: 600 !important;
-        font-size: 0.86rem !important;
-        padding: 10px 14px !important;
-        border-radius: 8px 8px 0 0 !important;
-        border-bottom: 2px solid transparent !important;
-        transition: color 140ms ease, background 140ms ease, border-color 140ms ease;
-    }
-    .stTabs [data-baseweb="tab"]:hover {
-        color: var(--text) !important;
-        background: rgba(255,255,255,0.02) !important;
-    }
-    .stTabs [aria-selected="true"] {
-        color: var(--text) !important;
-        border-bottom: 2px solid var(--brand) !important;
-        background: rgba(240,45,110,0.05) !important;
-    }
-    .stTabs [data-baseweb="tab-highlight"] { display: none !important; }
-
-    /* Buttons */
+    /* ---- Streamlit overrides (general) ---- */
     .stButton > button, .stDownloadButton > button {
-        font-weight: 600 !important;
-        border-radius: 10px !important;
-        border: 1px solid var(--border-strong) !important;
-        background: var(--surface-2) !important;
+        font-weight: 500 !important;
+        border-radius: 6px !important;
+        border: 1px solid var(--border) !important;
+        background: var(--surface) !important;
         color: var(--text) !important;
-        transition: transform 100ms ease, border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
+        transition: border-color 100ms ease, background 100ms ease;
+        box-shadow: none !important;
     }
     .stButton > button:hover, .stDownloadButton > button:hover {
-        border-color: var(--border-focus) !important;
-        background: #1d2740 !important;
-        transform: translateY(-1px);
+        border-color: var(--border-strong) !important;
+        background: var(--surface-2) !important;
+        transform: none !important;
     }
-    .stButton > button:active { transform: translateY(0); }
-    .stButton > button[kind="primary"], .stButton > button[data-testid*="primary"] {
-        background: var(--brand-grad) !important;
-        border: 1px solid transparent !important;
+    .stButton > button[kind="primary"] {
+        background: var(--brand) !important;
+        border-color: var(--brand) !important;
         color: #fff !important;
-        box-shadow: var(--shadow-glow);
     }
     .stButton > button[kind="primary"]:hover {
-        filter: brightness(1.06);
-        box-shadow: 0 0 0 1px rgba(240,45,110,0.35), 0 10px 28px rgba(240,45,110,0.22) !important;
+        background: var(--brand-2) !important;
+        border-color: var(--brand-2) !important;
     }
 
-    /* Inputs */
     .stTextInput input, .stNumberInput input, .stSelectbox > div[data-baseweb="select"] > div, .stMultiSelect > div[data-baseweb="select"] > div {
         background: var(--surface-2) !important;
-        border-color: var(--border-strong) !important;
+        border-color: var(--border) !important;
         color: var(--text) !important;
-        border-radius: 10px !important;
+        border-radius: 6px !important;
     }
     .stTextInput input:focus, .stNumberInput input:focus {
         border-color: var(--brand) !important;
-        box-shadow: 0 0 0 3px rgba(240,45,110,0.15) !important;
+        box-shadow: 0 0 0 3px rgba(233,78,126,0.12) !important;
     }
 
-    /* Metrics (st.metric) */
     [data-testid="stMetric"] {
-        background: linear-gradient(180deg, var(--surface) 0%, #0e1522 100%);
-        border: 1px solid var(--border-strong);
-        border-radius: 14px;
-        padding: 0.85rem 1rem;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 14px 16px;
     }
-    [data-testid="stMetricLabel"] { color: var(--text-faint) !important; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; font-size: 0.66rem !important; }
-    [data-testid="stMetricValue"] { color: var(--text) !important; font-weight: 700 !important; letter-spacing: -0.02em; }
+    [data-testid="stMetricLabel"] { color: var(--text-faint) !important; font-weight: 500; font-size: 0.72rem !important; }
+    [data-testid="stMetricValue"] { color: var(--text) !important; font-weight: 600 !important; letter-spacing: -0.02em; }
 
-    /* Expanders */
     .streamlit-expanderHeader, [data-testid="stExpander"] summary {
         background: var(--surface) !important;
-        border: 1px solid var(--border-strong) !important;
-        border-radius: 10px !important;
-        font-weight: 600 !important;
+        border: 1px solid var(--border) !important;
+        border-radius: 6px !important;
+        font-weight: 500 !important;
     }
 
-    /* Dataframes */
     .stDataFrame, [data-testid="stDataFrame"] {
-        border: 1px solid var(--border-strong);
-        border-radius: 10px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
         overflow: hidden;
     }
 
-    /* Alerts / info / warning / success */
-    [data-testid="stAlert"] {
-        border-radius: 10px;
-        border-width: 1px;
-        border-style: solid;
-    }
+    [data-testid="stAlert"] { border-radius: 8px; border-width: 1px; border-style: solid; }
 
-    /* Sidebar */
-    [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #0a0e17 0%, #07090f 100%);
-        border-right: 1px solid var(--border);
-    }
-
-    /* ---- Landing tiles ("What's new for you") ---- */
+    /* ---- Landing tiles ---- */
     .landing-grid {
-        display: grid; gap: 0.85rem;
+        display: grid; gap: 10px;
         grid-template-columns: repeat(3, minmax(0, 1fr));
-        margin: 0.4rem 0 1.25rem;
+        margin: 0 0 22px;
     }
-    @media (max-width: 900px) {
-        .landing-grid { grid-template-columns: 1fr; }
-    }
+    @media (max-width: 900px) { .landing-grid { grid-template-columns: 1fr; } }
     .landing-tile {
-        background: linear-gradient(180deg, var(--surface) 0%, #0e1522 100%);
-        border: 1px solid var(--border-strong);
-        border-radius: 14px;
-        padding: 0.95rem 1.1rem;
-        position: relative; overflow: hidden;
-        transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 16px 18px;
+        position: relative;
+        transition: border-color 140ms ease, background 140ms ease;
     }
-    .landing-tile::before {
-        content: ""; position: absolute; left: 0; right: 0; top: 0; height: 1px;
-        background: linear-gradient(90deg, transparent, rgba(240,45,110,0.5), transparent);
-        opacity: 0; transition: opacity 160ms ease;
-    }
-    .landing-tile:hover { transform: translateY(-1px); border-color: var(--border-focus); box-shadow: var(--shadow-md); }
-    .landing-tile:hover::before { opacity: 1; }
+    .landing-tile:hover { border-color: var(--border-strong); background: var(--surface-hover); }
     .lt-icon {
         position: absolute; top: 12px; right: 14px;
-        font-size: 1.05rem; opacity: 0.55; line-height: 1;
+        font-size: 0.95rem; opacity: 0.5; line-height: 1;
     }
     .lt-label {
-        color: var(--text-faint); font-size: 0.66rem; font-weight: 700;
-        text-transform: uppercase; letter-spacing: 0.14em;
-        margin-bottom: 6px;
+        color: var(--text-faint); font-size: 0.7rem; font-weight: 500;
+        margin-bottom: 6px; letter-spacing: 0.02em;
     }
     .lt-value {
-        color: var(--text); font-size: 1.55rem; font-weight: 800;
+        color: var(--text); font-size: 1.5rem; font-weight: 600;
         letter-spacing: -0.02em; line-height: 1.15;
-        font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1;
     }
-    .lt-welcome-value { background: var(--brand-grad); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; color: transparent; }
-    .lt-captain-name { font-size: 1.4rem; }
-    .lt-sub { color: var(--text-muted); font-size: 0.76rem; margin-top: 4px; font-weight: 500; }
+    .lt-welcome-value { color: var(--brand); }
+    .lt-captain-name { font-size: 1.35rem; }
+    .lt-sub { color: var(--text-muted); font-size: 0.78rem; margin-top: 4px; font-weight: 400; }
     .lt-countdown.lt-urgent { color: var(--brand-2); }
     .lt-countdown.lt-live { color: var(--good); }
-    .lt-cta { border-style: dashed; border-color: rgba(240,45,110,0.35); background: linear-gradient(180deg, rgba(240,45,110,0.06) 0%, rgba(240,45,110,0.01) 100%); }
+    .lt-cta {
+        border-style: dashed;
+        border-color: var(--brand-border);
+        background: var(--brand-soft);
+    }
 
     /* Hide chrome */
     #MainMenu { visibility: hidden; }
@@ -3515,20 +3523,49 @@ def render_landing_block(current_gw, df, team_data):
 # ============================================================
 
 def main():
-    # Header with logo — centered
-    st.markdown(
-        f'<div style="text-align:center; margin-bottom:0.5rem;">{DATUMLY_LOGO_SVG}</div>',
-        unsafe_allow_html=True,
-    )
+    # ============================================================
+    # SIDEBAR — brand + vertical nav + workspace controls
+    # ============================================================
+    if "active_nav" not in st.session_state:
+        st.session_state["active_nav"] = "my_team"
 
-    # === League Switcher ===
-    col_league, col_refresh, col_spacer = st.columns([1.5, 1, 4.5])
-    with col_league:
+    with st.sidebar:
+        # Brand mark — full lockup at sidebar width
+        st.markdown(
+            f'<div class="sb-brand">{DATUMLY_LOGO_SVG}</div>',
+            unsafe_allow_html=True,
+        )
+
+        # Section label
+        st.markdown('<div class="sb-section">Workspace</div>', unsafe_allow_html=True)
+
+        # Nav items — buttons that set active_nav. Active item rendered as a
+        # styled div so it's not a re-clickable button (saves a no-op rerun).
+        for _key, _emoji, _label in NAV_ITEMS:
+            _is_active = (st.session_state["active_nav"] == _key)
+            if _is_active:
+                st.markdown(
+                    f'<div class="sb-nav-item active">{_emoji}  {_label}</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                if st.button(
+                    f"{_emoji}  {_label}",
+                    key=f"sb_nav_{_key}",
+                    use_container_width=True,
+                ):
+                    st.session_state["active_nav"] = _key
+                    st.rerun()
+
+        st.markdown('<div class="sb-spacer"></div>', unsafe_allow_html=True)
+        st.markdown('<div class="sb-section">Workspace</div>', unsafe_allow_html=True)
+
+        # League switcher (compact)
         league_options = list(LEAGUE_CONFIGS.keys())
         league_labels = {k: v["name"] for k, v in LEAGUE_CONFIGS.items()}
         current_league = st.session_state.get("active_league", "FPL")
         selected_league = st.selectbox(
-            "🏆 League",
+            "League",
             options=league_options,
             format_func=lambda x: league_labels[x],
             index=league_options.index(current_league),
@@ -3540,8 +3577,7 @@ def main():
             st.cache_data.clear()
             st.rerun()
 
-    with col_refresh:
-        if st.button("🔄 Refresh Data"):
+        if st.button("🔄  Refresh data", key="sb_refresh", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
 
@@ -3586,22 +3622,30 @@ def main():
             bootstrap, fixtures_raw, team_odds
         )
 
-    # === GW Info ===
+    # === Slim top status strip ===
     if current_gw:
         deadline = datetime.fromisoformat(current_gw["deadline_time"].replace("Z", "+00:00"))
         status = "Completed" if current_gw.get("finished") else ("In Progress" if current_gw.get("is_current") else "Upcoming")
-        bc = "badge-green" if status == "Completed" else ("badge-yellow" if status == "In Progress" else "badge-blue")
-        planning_str = f"Planning for GW{planning_gw_id}" if planning_gw_id != current_gw.get("id") else ""
-        st.markdown(f"""<div class="gw-bar">
-            <span class="gw-num">Gameweek {current_gw['id']}</span>
-            <span class="gw-deadline">Deadline: {deadline.strftime('%a %d %b, %H:%M')}</span>
-            <span class="badge {bc}">{status}</span>
-            {f'<span class="badge badge-blue">{planning_str}</span>' if planning_str else ''}
-            <span style="color:#5a6580; font-size:0.68rem;">
-                Odds: {odds_status} · Elo: {elo_status} · Live: {live_status} ·
-                {fetch_time.strftime('%d %b %H:%M')} (cached)
-            </span>
-        </div>""", unsafe_allow_html=True)
+        active_label = next(
+            (lbl for k, _e, lbl in NAV_ITEMS if k == st.session_state.get("active_nav", "my_team")),
+            "My Team",
+        )
+        # Tooltip-style data-source line surfaces only on hover; keeps the strip slim.
+        data_sources_tip = (
+            f"Odds: {odds_status} · Elo: {elo_status} · Live: {live_status} · "
+            f"Fetched {fetch_time.strftime('%d %b %H:%M')}"
+        ).replace('"', "'")
+        st.markdown(
+            f'<div class="status-strip">'
+            f'<div class="status-h1">{active_label}</div>'
+            f'<div class="status-pills">'
+            f'<span class="status-pill"><span class="dot"></span>GW{current_gw["id"]} · {deadline.strftime("%a %d %b · %H:%M")}</span>'
+            f'<span class="status-pill subtle">{status}</span>'
+            f'<span class="status-pill subtle" title="{data_sources_tip}">Data sources</span>'
+            f'</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
     # === Landing block (above tabs): personalized snapshot for returning visitors ===
     # Auto-load team data if fpl_id is already known (from session or URL query param)
@@ -3622,26 +3666,21 @@ def main():
             _team_data_for_landing = None
     render_landing_block(current_gw, df, _team_data_for_landing)
 
-    # === Tabs ===
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
-        "🏠 My Team", "📊 Dashboard", "👥 Player Projections",
-        "⭐ Optimal Squad (MILP)", "🔄 Transfer Planner", "📅 Fixtures",
-        "🔬 Backtest", "🎯 Chip Strategy"
-    ])
-
+    # === Router ===
+    # The 8 view blocks below replace what used to be `st.tabs(...)`. Sidebar nav
+    # writes `active_nav`; we render exactly one block per rerun. Every existing
+    # `with tabN:` block is now `if/elif active_nav == "key":` at the same
+    # indentation level — content inside is unchanged.
     if st.session_state.pop("navigate_to_my_team", False):
-        components.html("""<script>
-        setTimeout(function(){
-            var t=window.parent.document.querySelectorAll('.stTabs button[data-baseweb="tab"]');
-            if(t&&t.length>0)t[0].click();
-        },300);
-        </script>""", height=0)
+        st.session_state["active_nav"] = "my_team"
+        st.rerun()
 
+    active_nav = st.session_state.get("active_nav", "my_team")
     active = df[df["minutes"] > 0].copy()
     qualified = df[df["minutes"] > 45].copy()
 
     # ==================== MY TEAM ====================
-    with tab1:
+    if active_nav == "my_team":
         st.markdown(
             '<div class="section-header">🏠 My Team — Enter Your FPL ID</div>',
             unsafe_allow_html=True,
@@ -4628,7 +4667,7 @@ def main():
                     "(e.g. fantasy.premierleague.com/entry/**123456**/event/1)")
 
     # ==================== DASHBOARD ====================
-    with tab2:
+    elif active_nav == "dashboard":
         if len(active) > 0:
             c1, c2, c3, c4 = st.columns(4)
             top_xpts = qualified.loc[qualified["xpts_total"].idxmax()] if len(qualified) > 0 else None
@@ -4826,7 +4865,7 @@ def main():
                 st.dataframe(ticker_df, use_container_width=True, height=700)
 
     # ==================== PLAYER PROJECTIONS ====================
-    with tab3:
+    elif active_nav == "players":
         fc1, fc2, fc3, fc4, fc5 = st.columns([2, 1, 1, 1, 1])
         with fc1:
             search = st.text_input("🔍 Search", "", key="ps2")
@@ -4926,7 +4965,7 @@ def main():
             st.info("No breakdown available for this player (may not have enough minutes or upcoming fixtures).")
 
     # ==================== OPTIMAL SQUAD (MILP) ====================
-    with tab4:
+    elif active_nav == "optimal":
         st.markdown(
             '<div class="section-header">⭐ MILP-Optimised Squad '
             '<span class="source-tag src-model">PuLP Solver</span></div>',
@@ -5030,7 +5069,7 @@ def main():
                 st.warning(f"Could not find optimal squad: {solve_err}")
 
     # ==================== TRANSFER PLANNER ====================
-    with tab5:
+    elif active_nav == "transfers":
         st.markdown('<div class="section-header">🔄 Transfer Suggestions <span class="source-tag src-model">xPts Model</span></div>', unsafe_allow_html=True)
         st.caption("Finds the highest-xPts replacements for underperforming popular players, matched by position.")
 
@@ -5095,7 +5134,7 @@ def main():
             st.dataframe(fo, use_container_width=True)
 
     # ==================== FIXTURES ====================
-    with tab6:
+    elif active_nav == "fixtures":
         st.markdown('<div class="section-header">Fixture Difficulty — Next 6 Gameweeks <span class="source-tag src-odds">Odds-enhanced</span></div>', unsafe_allow_html=True)
         gw_range = list(range(planning_gw_id, planning_gw_id + 6))
 
@@ -5145,7 +5184,7 @@ def main():
         st.dataframe(fdf, use_container_width=True, height=740)
 
     # ==================== BACKTEST ====================
-    with tab7:
+    elif active_nav == "backtest":
         st.markdown(
             '<div class="section-header">🔬 Model Backtesting '
             '<span class="source-tag src-model">Accuracy Analysis</span></div>',
@@ -5456,7 +5495,7 @@ def main():
             st.info("Need completed gameweeks to run backtest.")
 
     # ==================== CHIP STRATEGY ====================
-    with tab8:
+    elif active_nav == "chips":
         st.markdown(
             '<div class="section-header">🎯 Chip Strategy Optimiser '
             '<span class="source-tag src-model">Brute-Force</span></div>',
