@@ -168,18 +168,28 @@ st.set_page_config(
 # ============================================================
 # NAVIGATION
 # ============================================================
-# Sidebar-driven router. Each entry: (key, emoji, label).
-# `st.session_state["active_nav"]` is the single source of truth — the sidebar
-# nav writes it on click; the main body reads it to decide what to render.
+# Sidebar-driven router. Each entry: (key, label, icon_svg). Lucide-style icons:
+# 16×16, 1.5px stroke, currentColor — picks up the active brand-pink colour
+# automatically via CSS. `st.session_state["active_nav"]` is the single source
+# of truth; nav links also reflect into the URL via ?nav= so views are bookmarkable.
+_ICON_MY_TEAM = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 7 L8 2.5 L14 7 L14 13.5 L2 13.5 Z"/><path d="M6.5 13.5 L6.5 9 L9.5 9 L9.5 13.5"/></svg>'
+_ICON_DASHBOARD = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="5" height="5"/><rect x="9" y="2" width="5" height="5"/><rect x="2" y="9" width="5" height="5"/><rect x="9" y="9" width="5" height="5"/></svg>'
+_ICON_PLAYERS = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="6" r="2.5"/><path d="M2.5 13.5 C2.5 11 5 9.5 8 9.5 C11 9.5 13.5 11 13.5 13.5"/></svg>'
+_ICON_OPTIMAL = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M8 1.5 L9.7 5.7 L14 6.1 L10.6 9 L11.7 13.3 L8 11 L4.3 13.3 L5.4 9 L2 6.1 L6.3 5.7 Z"/></svg>'
+_ICON_TRANSFERS = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5 L11 5 L9 3"/><path d="M13 11 L5 11 L7 13"/></svg>'
+_ICON_FIXTURES = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="12" height="11" rx="1.2"/><path d="M2 6 L14 6"/><path d="M5 1.5 L5 4"/><path d="M11 1.5 L11 4"/></svg>'
+_ICON_BACKTEST = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12 L6 8 L9 11 L14 4"/><path d="M11 4 L14 4 L14 7"/></svg>'
+_ICON_CHIPS = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M9 1 L4 9 L7.5 9 L6.5 15 L11.5 7 L8 7 Z"/></svg>'
+
 NAV_ITEMS = [
-    ("my_team", "🏠", "My Team"),
-    ("dashboard", "📊", "Dashboard"),
-    ("players", "👥", "Player Projections"),
-    ("optimal", "⭐", "Optimal Squad"),
-    ("transfers", "🔄", "Transfer Planner"),
-    ("fixtures", "📅", "Fixtures"),
-    ("backtest", "🔬", "Backtest"),
-    ("chips", "🎯", "Chip Strategy"),
+    ("my_team", "My Team", _ICON_MY_TEAM),
+    ("dashboard", "Dashboard", _ICON_DASHBOARD),
+    ("players", "Player Projections", _ICON_PLAYERS),
+    ("optimal", "Optimal Squad", _ICON_OPTIMAL),
+    ("transfers", "Transfer Planner", _ICON_TRANSFERS),
+    ("fixtures", "Fixtures", _ICON_FIXTURES),
+    ("backtest", "Backtest", _ICON_BACKTEST),
+    ("chips", "Chip Strategy", _ICON_CHIPS),
 ]
 
 # League selector (persisted in session state)
@@ -468,12 +478,37 @@ st.markdown("""
     [data-testid="stSidebar"] > div:first-child { padding-top: 8px; }
     [data-testid="stSidebar"] [data-testid="stSidebarContent"] { padding: 12px 14px; }
     .sb-brand {
-        display: flex; align-items: center;
-        padding: 6px 6px 18px;
+        display: flex; align-items: center; justify-content: center;
+        padding: 14px 6px 22px;
         border-bottom: 1px solid var(--border);
         margin-bottom: 14px;
     }
-    .sb-brand svg { height: 32px; width: auto; }
+    .sb-brand svg { height: 56px; width: auto; max-width: 100%; }
+
+    /* HTML-link nav (replaces emoji+button pattern) */
+    .sb-nav { display: flex; flex-direction: column; gap: 1px; }
+    .sb-nav-item {
+        display: flex; align-items: center; gap: 11px;
+        padding: 8px 12px;
+        font-size: 0.86rem; font-weight: 500;
+        color: var(--text-muted);
+        border-radius: 6px;
+        text-decoration: none;
+        transition: background 100ms ease, color 100ms ease;
+    }
+    .sb-nav-item:hover { background: var(--surface-2); color: var(--text); }
+    .sb-nav-item.active {
+        background: var(--surface-2);
+        color: var(--text);
+        font-weight: 600;
+    }
+    .sb-nav-icon {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 16px; height: 16px; flex-shrink: 0;
+        opacity: 0.85;
+    }
+    .sb-nav-item.active .sb-nav-icon { opacity: 1; color: var(--brand); }
+    .sb-nav-icon svg { width: 16px; height: 16px; }
     .sb-section {
         font-size: 0.62rem; font-weight: 600; letter-spacing: 0.14em;
         text-transform: uppercase; color: var(--text-faint);
@@ -3458,7 +3493,7 @@ def render_landing_block(current_gw, df, team_data):
 
     tile_deadline = (
         f'<div class="landing-tile lt-deadline">'
-        f'<div class="lt-icon">⏱</div>'
+        f'<div class="lt-icon"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="9" r="5.5"/><path d="M8 6 L8 9 L10 10.5"/><path d="M6 1.5 L10 1.5"/></svg></div>'
         f'<div class="lt-label">{gw_label} Deadline</div>'
         f'<div class="lt-value lt-countdown {countdown_class}">{countdown_text}</div>'
         f'<div class="lt-sub">{deadline_str}</div>'
@@ -3487,7 +3522,7 @@ def render_landing_block(current_gw, df, team_data):
             )
         tile_welcome = (
             f'<div class="landing-tile lt-welcome">'
-            f'<div class="lt-icon">👋</div>'
+            f'<div class="lt-icon"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="5" r="2.5"/><path d="M2.5 13.5 C2.5 11 5 9.5 8 9.5 C11 9.5 13.5 11 13.5 13.5"/></svg></div>'
             f'<div class="lt-label">{team_name}</div>'
             f'<div class="lt-value lt-welcome-value">{big}</div>'
             f'<div class="lt-sub">{sub}</div>'
@@ -3496,7 +3531,7 @@ def render_landing_block(current_gw, df, team_data):
     else:
         tile_welcome = (
             '<div class="landing-tile lt-welcome lt-cta">'
-            '<div class="lt-icon">👋</div>'
+            '<div class="lt-icon"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="5" r="2.5"/><path d="M2.5 13.5 C2.5 11 5 9.5 8 9.5 C11 9.5 13.5 11 13.5 13.5"/></svg></div>'
             '<div class="lt-label">Make it personal</div>'
             '<div class="lt-value lt-welcome-value">Add your FPL ID</div>'
             '<div class="lt-sub">See your team, captain pick, and transfer ideas</div>'
@@ -3524,7 +3559,7 @@ def render_landing_block(current_gw, df, team_data):
     cap_sub = f"{cap_xpts:.1f} xPts · {cap_team}" if cap_xpts is not None else "—"
     tile_captain = (
         f'<div class="landing-tile lt-captain">'
-        f'<div class="lt-icon">©</div>'
+        f'<div class="lt-icon"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M8 1.5 L9.7 5.7 L14 6.1 L10.6 9 L11.7 13.3 L8 11 L4.3 13.3 L5.4 9 L2 6.1 L6.3 5.7 Z"/></svg></div>'
         f'<div class="lt-label">{captain_label}</div>'
         f'<div class="lt-value lt-captain-name">{cap_name}</div>'
         f'<div class="lt-sub">{cap_sub}</div>'
@@ -3543,39 +3578,45 @@ def main():
     # ============================================================
     # SIDEBAR — brand + vertical nav + workspace controls
     # ============================================================
-    if "active_nav" not in st.session_state:
+    # Read nav from URL query param first — keeps views bookmarkable and lets
+    # the HTML `<a>` link nav drive state without round-tripping through buttons.
+    _valid_navs = {k for k, _l, _i in NAV_ITEMS}
+    _qp_nav = st.query_params.get("nav", "") if hasattr(st, "query_params") else ""
+    if _qp_nav and _qp_nav in _valid_navs:
+        st.session_state["active_nav"] = _qp_nav
+    elif "active_nav" not in st.session_state:
         st.session_state["active_nav"] = "my_team"
 
     with st.sidebar:
-        # Brand mark — full lockup at sidebar width
+        # Brand mark — centered in the sidebar
         st.markdown(
             f'<div class="sb-brand">{DATUMLY_LOGO_SVG}</div>',
             unsafe_allow_html=True,
         )
 
-        # Section label
         st.markdown('<div class="sb-section">Workspace</div>', unsafe_allow_html=True)
 
-        # Nav items — buttons that set active_nav. Active item rendered as a
-        # styled div so it's not a re-clickable button (saves a no-op rerun).
-        for _key, _emoji, _label in NAV_ITEMS:
-            _is_active = (st.session_state["active_nav"] == _key)
-            if _is_active:
-                st.markdown(
-                    f'<div class="sb-nav-item active">{_emoji}  {_label}</div>',
-                    unsafe_allow_html=True,
-                )
-            else:
-                if st.button(
-                    f"{_emoji}  {_label}",
-                    key=f"sb_nav_{_key}",
-                    use_container_width=True,
-                ):
-                    st.session_state["active_nav"] = _key
-                    st.rerun()
+        # HTML-link nav: each item navigates via ?nav=key. We preserve fpl_id
+        # in the query string so the personalized landing block keeps working.
+        _fpl_qp = ""
+        if st.session_state.get("fpl_id"):
+            _fpl_qp = f"&fpl_id={st.session_state['fpl_id']}"
+
+        _active_nav = st.session_state["active_nav"]
+        _nav_html = ['<div class="sb-nav">']
+        for _key, _label, _icon in NAV_ITEMS:
+            _cls = "sb-nav-item active" if _key == _active_nav else "sb-nav-item"
+            _nav_html.append(
+                f'<a class="{_cls}" href="?nav={_key}{_fpl_qp}" target="_self">'
+                f'<span class="sb-nav-icon">{_icon}</span>'
+                f'<span class="sb-nav-label">{_label}</span>'
+                f'</a>'
+            )
+        _nav_html.append('</div>')
+        st.markdown(''.join(_nav_html), unsafe_allow_html=True)
 
         st.markdown('<div class="sb-spacer"></div>', unsafe_allow_html=True)
-        st.markdown('<div class="sb-section">Workspace</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sb-section">Settings</div>', unsafe_allow_html=True)
 
         # League switcher (compact)
         league_options = list(LEAGUE_CONFIGS.keys())
@@ -3594,7 +3635,7 @@ def main():
             st.cache_data.clear()
             st.rerun()
 
-        if st.button("🔄  Refresh data", key="sb_refresh", use_container_width=True):
+        if st.button("Refresh data", key="sb_refresh", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
 
@@ -3610,7 +3651,7 @@ def main():
 
     if fpl_err or bootstrap is None:
         st.error(f"Failed to load {league_name} data: {fpl_err}")
-        if st.button("🔄 Retry"):
+        if st.button("Retry"):
             st.cache_data.clear()
             st.rerun()
         return
@@ -3690,6 +3731,10 @@ def main():
     # indentation level — content inside is unchanged.
     if st.session_state.pop("navigate_to_my_team", False):
         st.session_state["active_nav"] = "my_team"
+        try:
+            st.query_params["nav"] = "my_team"
+        except Exception:
+            pass
         st.rerun()
 
     active_nav = st.session_state.get("active_nav", "my_team")
@@ -3699,7 +3744,7 @@ def main():
     # ==================== MY TEAM ====================
     if active_nav == "my_team":
         st.markdown(
-            '<div class="section-header">🏠 My Team — Enter Your FPL ID</div>',
+            '<div class="section-header">My Team — Enter Your FPL ID</div>',
             unsafe_allow_html=True,
         )
 
@@ -3842,7 +3887,7 @@ def main():
 
                     # === CHIP & TRANSFER PLANNER ===
                     st.markdown(
-                        '<div class="section-header">🗓️ Gameweek-by-Gameweek Planner '
+                        '<div class="section-header">Gameweek-by-Gameweek Planner '
                         '<span class="source-tag src-model">Rolling Planner</span></div>',
                         unsafe_allow_html=True,
                     )
@@ -3871,7 +3916,7 @@ def main():
                             key = planner_to_key.get(cname)
                             if key:
                                 st.session_state[key] = gw_a
-                        st.success("✅ Chip strategy applied from the 🎯 Chip Strategy tab!")
+                        st.success("Chip strategy applied from the Chip Strategy tab!")
 
                     chip_cols = st.columns(4)
                     with chip_cols[0]:
@@ -4166,7 +4211,7 @@ def main():
 
                     # Step 4: Generate plan
                     st.markdown("**Step 4: Generate your optimal plan**")
-                    generate = st.button("🚀 Generate 6-Gameweek Plan", use_container_width=True, type="primary")
+                    generate = st.button("Generate 6-Gameweek Plan", use_container_width=True, type="primary")
 
                     # Auto-run if triggered from Chip Strategy tab's Apply button
                     auto_run = st.session_state.pop("plan_auto_run", False)
@@ -4250,7 +4295,7 @@ def main():
 
                         # Warn if settings have changed since plan was generated
                         if plan and not generate and st.session_state.get("last_plan_fingerprint") != _settings_fp:
-                            st.warning("⚠️ Settings have changed since this plan was generated. Click **🚀 Generate 6-Gameweek Plan** above to refresh.")
+                            st.warning("Settings have changed since this plan was generated. Click **Generate 6-Gameweek Plan** above to refresh.")
 
                         # Plan summary
                         if plan:
@@ -4497,7 +4542,7 @@ def main():
                         # === EXPORT PLAN TO EXCEL ===
                         if plan and len(plan) > 0:
                             st.markdown("")
-                            if st.button("📥 Export Plan to Excel", use_container_width=True):
+                            if st.button("Export Plan to Excel", use_container_width=True):
                                 import io
                                 from openpyxl import Workbook
                                 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -4734,7 +4779,7 @@ def main():
         # ==================== CAPTAIN OPTIMISER ====================
         st.markdown("")
         st.markdown(
-            '<div class="section-header">👑 Captain Optimiser '
+            '<div class="section-header">Captain Optimiser '
             '<span class="source-tag src-model">Next GW</span></div>',
             unsafe_allow_html=True,
         )
@@ -4803,7 +4848,7 @@ def main():
         # ==================== OWNERSHIP ANALYSIS ====================
         st.markdown("")
         st.markdown(
-            '<div class="section-header">📊 Ownership Analysis '
+            '<div class="section-header">Ownership Analysis '
             '<span class="source-tag src-fpl">Effective Ownership</span></div>',
             unsafe_allow_html=True,
         )
@@ -4818,7 +4863,7 @@ def main():
             col_safe, col_diff, col_trap = st.columns(3)
 
             with col_safe:
-                st.markdown("**🛡️ Must-Haves** (high own%, high xPts)")
+                st.markdown("**Must-Haves** (high own%, high xPts)")
                 must_haves = own_df[(own_df["selected_pct"] >= 20) & (own_df["xpts_next_gw"] > 0)].nlargest(8, "xpts_next_gw")
                 for _, p in must_haves.iterrows():
                     st.markdown(
@@ -4829,7 +4874,7 @@ def main():
                     )
 
             with col_diff:
-                st.markdown("**🎯 Differentials** (low own%, high xPts)")
+                st.markdown("**Differentials** (low own%, high xPts)")
                 differentials = own_df[(own_df["selected_pct"] < 15)].nlargest(8, "xpts_next_gw")
                 for _, p in differentials.iterrows():
                     st.markdown(
@@ -4840,7 +4885,7 @@ def main():
                     )
 
             with col_trap:
-                st.markdown("**⚠️ Traps** (high own%, low xPts next GW)")
+                st.markdown("**Traps** (high own%, low xPts next GW)")
                 traps = own_df[own_df["selected_pct"] >= 15].nsmallest(8, "xpts_next_gw")
                 for _, p in traps.iterrows():
                     st.markdown(
@@ -4853,7 +4898,7 @@ def main():
         # ==================== FIXTURE TICKER ====================
         st.markdown("")
         st.markdown(
-            '<div class="section-header">📅 Fixture Sequence Ticker '
+            '<div class="section-header">Fixture Sequence Ticker '
             '<span class="source-tag src-fpl">Next 6 GWs</span></div>',
             unsafe_allow_html=True,
         )
@@ -4924,7 +4969,7 @@ def main():
 
         # === xPts BREAKDOWN INSPECTOR ===
         st.markdown("")
-        st.markdown("**🔬 xPts Breakdown Inspector**")
+        st.markdown("**xPts Breakdown Inspector**")
         inspect_labels = {
             row["id"]: f"{row['name']} ({row['team']}, {row['pos']}, £{row['price']:.1f}m)"
             for _, row in active.sort_values("xpts_total", ascending=False).head(200).iterrows()
@@ -4984,7 +5029,7 @@ def main():
     # ==================== OPTIMAL SQUAD (MILP) ====================
     elif active_nav == "optimal":
         st.markdown(
-            '<div class="section-header">⭐ MILP-Optimised Squad '
+            '<div class="section-header">MILP-Optimised Squad '
             '<span class="source-tag src-model">PuLP Solver</span></div>',
             unsafe_allow_html=True,
         )
@@ -5087,7 +5132,7 @@ def main():
 
     # ==================== TRANSFER PLANNER ====================
     elif active_nav == "transfers":
-        st.markdown('<div class="section-header">🔄 Transfer Suggestions <span class="source-tag src-model">xPts Model</span></div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-header">Transfer Suggestions <span class="source-tag src-model">xPts Model</span></div>', unsafe_allow_html=True)
         st.caption("Finds the highest-xPts replacements for underperforming popular players, matched by position.")
 
         if len(qualified) > 0:
@@ -5138,13 +5183,13 @@ def main():
         st.markdown("")
         cr, cf = st.columns(2)
         with cr:
-            st.subheader("📈 Most Transferred In")
+            st.subheader("Most Transferred In")
             ri = active.nlargest(10, "transfers_in")[["name", "team", "pos", "price", "transfers_in", "xpts_total"]].copy()
             ri.columns = ["Player", "Team", "Pos", "Price", "In", "xPts 6GW"]
             ri = ri.reset_index(drop=True); ri.index += 1
             st.dataframe(ri, use_container_width=True)
         with cf:
-            st.subheader("📉 Most Transferred Out")
+            st.subheader("Most Transferred Out")
             fo = active.nlargest(10, "transfers_out")[["name", "team", "pos", "price", "transfers_out", "xpts_total"]].copy()
             fo.columns = ["Player", "Team", "Pos", "Price", "Out", "xPts 6GW"]
             fo = fo.reset_index(drop=True); fo.index += 1
@@ -5203,7 +5248,7 @@ def main():
     # ==================== BACKTEST ====================
     elif active_nav == "backtest":
         st.markdown(
-            '<div class="section-header">🔬 Model Backtesting '
+            '<div class="section-header">Model Backtesting '
             '<span class="source-tag src-model">Accuracy Analysis</span></div>',
             unsafe_allow_html=True,
         )
@@ -5216,7 +5261,7 @@ def main():
         completed_gws = sorted(completed_gws, key=lambda e: e["id"], reverse=True)[:6]
 
         if completed_gws and len(active) > 0:
-            if st.button("🔬 Run Backtest", use_container_width=True, type="primary"):
+            if st.button("Run Backtest", use_container_width=True, type="primary"):
                 headers = {"User-Agent": "FPL-Optimizer/2.0"}
 
                 all_comparisons = []
@@ -5405,7 +5450,7 @@ def main():
             # ==================== PARAMETER TUNER ====================
             st.markdown("---")
             st.markdown(
-                '<div class="section-header">⚙️ Model Parameter Tuner '
+                '<div class="section-header">Model Parameter Tuner '
                 '<span class="source-tag src-model">Auto-Calibration</span></div>',
                 unsafe_allow_html=True,
             )
@@ -5514,7 +5559,7 @@ def main():
     # ==================== CHIP STRATEGY ====================
     elif active_nav == "chips":
         st.markdown(
-            '<div class="section-header">🎯 Chip Strategy Optimiser '
+            '<div class="section-header">Chip Strategy Optimiser '
             '<span class="source-tag src-model">Brute-Force</span></div>',
             unsafe_allow_html=True,
         )
@@ -5523,7 +5568,7 @@ def main():
 
         # Need team data for this feature
         if "team_data" not in st.session_state or st.session_state.get("team_data") is None:
-            st.info("Load your FPL team in the 🏠 My Team tab first, then come back here.")
+            st.info("Load your FPL team in the My Team tab first, then come back here.")
         else:
             team_data_chip = st.session_state["team_data"]
             chips_rem_chip = team_data_chip.get("chips_remaining", {})
@@ -5550,7 +5595,7 @@ def main():
                 ft_chip = team_data_chip.get("free_transfers", 1)
 
                 # User-defined expected DGWs and BGWs
-                st.markdown("**📅 Expected Double & Blank Gameweeks**")
+                st.markdown("**Expected Double & Blank Gameweeks**")
                 st.caption("The FPL fixture feed often doesn't show DGWs/BGWs until they're confirmed. "
                             "Use community intel (Ben Crellin, FPL Scout) to flag expected DGWs and BGWs. "
                             "The chip strategy will weight these weeks heavily for TC/BB/FH.")
@@ -5576,12 +5621,12 @@ def main():
 
                 st.markdown("")
 
-                if st.button("🚀 Find Optimal Chip Strategy", use_container_width=True, type="primary"):
+                if st.button("Find Optimal Chip Strategy", use_container_width=True, type="primary"):
                     from itertools import combinations, permutations
                     from collections import Counter
 
                     # === FIXTURE ANALYSIS — show DGWs/blanks ===
-                    st.markdown("### 📅 Fixture Analysis")
+                    st.markdown("### Fixture Analysis")
                     events_all = bootstrap.get("events", [])
                     future_all = [e for e in events_all if e.get("id", 0) >= planning_gw_id and e.get("id", 0) <= LC["season_gws"]]
 
@@ -5915,7 +5960,7 @@ def main():
                                 unsafe_allow_html=True,
                             )
                         with col_btn:
-                            if schedule and st.button("✅ Apply & Run", key=f"apply_chip_{rank}", use_container_width=True):
+                            if schedule and st.button("Apply & Run", key=f"apply_chip_{rank}", use_container_width=True):
                                 # Store applied strategy and flag to auto-run the planner
                                 st.session_state["applied_chip_schedule"] = dict(schedule)
                                 st.session_state["plan_auto_run"] = True
