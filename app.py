@@ -159,8 +159,8 @@ LEAGUE_CONFIGS = {
 # Default league (will be overridden by UI selection)
 ACTIVE_LEAGUE = "FPL"
 st.set_page_config(
-    page_title="Datumly - Fantasy Intelligence",
-    page_icon="📊",
+    page_title="Datumly - FPL Analytics",
+    page_icon="favicon.svg",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
