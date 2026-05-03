@@ -1398,27 +1398,37 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
         # Get rotation data if available
         rot = (rotation_data or {}).get(pid)
 
-        # FPL's chance_of_playing (None = no news = likely available)
+        # P(plays) = P(fit) × P(starts | fit). The two signals constrain each
+        # other multiplicatively rather than one short-circuiting the other:
+        #   * `fitness` comes from FPL's chance_of_playing_next_round (injury flag).
+        #   * `rotation_factor` comes from recent start patterns (selection signal).
+        # The previous `if chance is not None ... elif rot` made these mutually
+        # exclusive — so a benched-but-fit player like Awoniyi (chance=100,
+        # rotation_factor≈0) skipped the rotation model entirely and projected as
+        # if he were a nailed starter. Combining them multiplicatively is the
+        # correct probabilistic treatment.
         chance = p.get("chance_playing", None)
         if chance is not None and not pd.isna(chance):
-            availability = float(chance) / 100.0
-        elif rot:
-            # Use rotation model — projected start probability from recent pattern
-            # This is the key improvement: a player who starts 60% of games
-            # (e.g. Pep roulette victim) gets 0.60 availability, not 0.95
-            availability = rot["projected_start_prob"]
+            fitness = float(chance) / 100.0
         else:
-            # Fallback: basic pattern from season average
+            fitness = 1.0  # no injury flag = treated as fully fit
+
+        if rot:
+            rotation_factor = rot["projected_start_prob"]
+        else:
+            # No recent appearance data — fall back to a coarse heuristic
             if avg_mins_per_gw >= 60:
-                availability = 0.95
+                rotation_factor = 0.95
             elif avg_mins_per_gw >= 30:
-                availability = 0.75
+                rotation_factor = 0.75
             elif avg_mins_per_gw >= 10:
-                availability = 0.40
+                rotation_factor = 0.40
             elif mins > 0:
-                availability = 0.15
+                rotation_factor = 0.15
             else:
-                availability = 0.0
+                rotation_factor = 0.0
+
+        availability = fitness * rotation_factor
 
         # Expected minutes: E[mins] = E[mins | played] * P(plays). Three branches:
         #   1. rot exists with recent appearances → use per-appearance mins × P(start).
@@ -2025,8 +2035,15 @@ def solve_best_xi(squad_df, xpts_col="xpts_next_gw"):
 # DATA ENRICHMENT
 # ============================================================
 
+# Bump this when any code that influences xpts_map / df changes (build_xpts_model,
+# compute_rotation_risk, etc.). Streamlit's @st.cache_data hashes the decorated
+# function's source only — not its callees — so model updates can otherwise be
+# masked by stale cache. Treating the version as an argument forces invalidation.
+MODEL_VERSION = "2026.05.03.fitness_rotation_combine"
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
-def enrich_data(bootstrap, fixtures, team_odds):
+def enrich_data(bootstrap, fixtures, team_odds, model_version=MODEL_VERSION):
     """Combine all data sources into a single enriched DataFrame.
 
     Cached for 1 hour because this is the heavyweight pipeline (xPts model
