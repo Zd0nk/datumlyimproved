@@ -475,6 +475,20 @@ st.markdown("""
         border-right: 1px solid var(--border) !important;
         min-width: 240px !important;
     }
+    /* Hide Streamlit's default sidebar collapse control. We render a
+       permanent custom nav, and recent Streamlit versions ship a collapse
+       button whose Material-Icons ligature ("keyboard_double_arrow_left")
+       leaks into the top-left corner as either a visible label or a hover
+       tooltip when the icon font is slow to load. Hiding it removes the
+       artefact and matches the always-visible-sidebar pattern of Linear /
+       Vercel / Notion. */
+    [data-testid="stSidebarCollapseButton"],
+    [data-testid="stSidebarCollapsedControl"],
+    [data-testid="collapsedControl"],
+    button[kind="headerNoPadding"][title*="keyboard"],
+    button[title*="keyboard_double"] {
+        display: none !important;
+    }
     [data-testid="stSidebar"] > div:first-child { padding-top: 8px; }
     [data-testid="stSidebar"] [data-testid="stSidebarContent"] { padding: 12px 14px; }
     .sb-brand {
