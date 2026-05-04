@@ -1692,12 +1692,13 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
             # This gives a ~40% swing which matches real FPL points variance by fixture
             raw_scale = (opp_def_str * 0.55 + team_atk_str * 0.25 + 0.20)
             scale = raw_scale  # no dampening — let fixtures matter
-            # Home advantage is already baked into live (fixture-specific) bookmaker
-            # odds — applying another multiplier on top double-counts venue. Only
-            # add the boost on the season-average fallback path where odds are
-            # venue-agnostic.
+            # Home advantage is partially baked into live bookmaker odds (the
+            # team-level expected-goals split already favours the home side),
+            # but there's a separate individual-player home effect (familiarity,
+            # crowd, refs) worth ~4-5%. So apply a half-strength boost when live
+            # odds are present; full strength on the season-average fallback.
             if live_fixture:
-                home_boost = 1.0
+                home_boost = 1.04 if fix["home"] else 0.98
             else:
                 home_boost = 1.08 if fix["home"] else 0.96
 
