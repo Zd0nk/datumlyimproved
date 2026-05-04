@@ -3715,6 +3715,12 @@ def main():
             bootstrap, fixtures_raw, team_odds
         )
 
+    # Clamp planning horizon to season end. Showing GW39+ in the planner /
+    # fixtures grid / ticker is misleading because no fixtures exist past the
+    # final GW. Compute remaining GWs once and reuse everywhere a "next 6 GW"
+    # window is shown. Floors at 1 to keep loops well-defined on the final GW.
+    n_planning_gws = max(1, min(6, LC["season_gws"] - planning_gw_id + 1))
+
     # === Slim top status strip ===
     if current_gw:
         deadline = datetime.fromisoformat(current_gw["deadline_time"].replace("Z", "+00:00"))
@@ -3932,7 +3938,7 @@ def main():
 
                     # Step 1: Chip selection
                     st.markdown("**Step 1: Set your chip schedule**")
-                    gw_options = [planning_gw_id + i for i in range(6)]
+                    gw_options = [planning_gw_id + i for i in range(n_planning_gws)]
 
                     # Check if a chip strategy was applied from the Chip Strategy tab
                     applied = st.session_state.pop("applied_chip_schedule", None)
@@ -4187,7 +4193,7 @@ def main():
 
                     blank_overrides = {}  # {gw: set of team_short_names}
                     dgw_overrides = {}    # {gw: set of team_short_names}
-                    gw_options_plan = [planning_gw_id + i for i in range(6)]
+                    gw_options_plan = [planning_gw_id + i for i in range(n_planning_gws)]
 
                     # Show compact inputs for blanks AND doubles per GW
                     for gw_b in gw_options_plan:
@@ -4316,7 +4322,7 @@ def main():
                                     selling_prices_api=team_data.get("selling_prices_api", {}),
                                     xpts_map=xpts_map_adjusted,
                                     planning_gw_id=planning_gw_id,
-                                    n_gws=6,
+                                    n_gws=n_planning_gws,
                                     chip_schedule=chip_schedule,
                                     team_fixture_counts=team_fixture_counts,
                                     locked_ids=planner_locked_ids,
@@ -4729,7 +4735,7 @@ def main():
                                 st.download_button(
                                     label="⬇️ Download Plan (.xlsx)",
                                     data=buf,
-                                    file_name=f"datumly_plan_GW{planning_gw_id}-{planning_gw_id + 5}.xlsx",
+                                    file_name=f"datumly_plan_GW{planning_gw_id}-{planning_gw_id + n_planning_gws - 1}.xlsx",
                                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                     use_container_width=True,
                                 )
@@ -4791,7 +4797,11 @@ def main():
                     </div>""", unsafe_allow_html=True)
 
         st.markdown("")
-        st.markdown('<div class="section-header">Top xPts Picks — Next 6 Gameweeks <span class="source-tag src-model">xPts Model</span></div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="section-header">Top xPts Picks — Next {n_planning_gws} Gameweek{"s" if n_planning_gws != 1 else ""} '
+            f'<span class="source-tag src-model">xPts Model</span></div>',
+            unsafe_allow_html=True,
+        )
         if len(qualified) > 0:
             tp = qualified.nlargest(15, "xpts_total")[
                 ["name", "team", "pos", "price", "total_points", "xpts_next_gw", "xpts_total", "value"]
@@ -4933,8 +4943,8 @@ def main():
         # ==================== FIXTURE TICKER ====================
         st.markdown("")
         st.markdown(
-            '<div class="section-header">Fixture Sequence Ticker '
-            '<span class="source-tag src-fpl">Next 6 GWs</span></div>',
+            f'<div class="section-header">Fixture Sequence Ticker '
+            f'<span class="source-tag src-fpl">Next {n_planning_gws} GW{"s" if n_planning_gws != 1 else ""}</span></div>',
             unsafe_allow_html=True,
         )
         st.caption("Green = easy fixture (FDR 1-2), amber = medium (3), red = hard (4-5). "
@@ -5232,8 +5242,12 @@ def main():
 
     # ==================== FIXTURES ====================
     elif active_nav == "fixtures":
-        st.markdown('<div class="section-header">Fixture Difficulty — Next 6 Gameweeks <span class="source-tag src-odds">Odds-enhanced</span></div>', unsafe_allow_html=True)
-        gw_range = list(range(planning_gw_id, planning_gw_id + 6))
+        st.markdown(
+            f'<div class="section-header">Fixture Difficulty — Next {n_planning_gws} Gameweek{"s" if n_planning_gws != 1 else ""} '
+            f'<span class="source-tag src-odds">Odds-enhanced</span></div>',
+            unsafe_allow_html=True,
+        )
+        gw_range = list(range(planning_gw_id, planning_gw_id + n_planning_gws))
 
         fm = {t_id: {} for t_id in teams}
         for f in fixtures_list:
@@ -5598,8 +5612,11 @@ def main():
             '<span class="source-tag src-model">Brute-Force</span></div>',
             unsafe_allow_html=True,
         )
-        st.caption("Evaluates every possible chip-to-gameweek combination and picks the strategy "
-                    "that maximises your total xPts over the next 6 GWs. Requires your FPL ID to be loaded.")
+        st.caption(
+            f"Evaluates every possible chip-to-gameweek combination and picks the strategy "
+            f"that maximises your total xPts over the next {n_planning_gws} GW{'s' if n_planning_gws != 1 else ''}. "
+            f"Requires your FPL ID to be loaded."
+        )
 
         # Need team data for this feature
         if "team_data" not in st.session_state or st.session_state.get("team_data") is None:
@@ -5750,7 +5767,7 @@ def main():
                         "wildcard": "wildcard", "freehit": "free_hit",
                         "3xc": "triple_captain", "bboost": "bench_boost",
                     }
-                    plan_gws = [planning_gw_id + i for i in range(6)]
+                    plan_gws = [planning_gw_id + i for i in range(n_planning_gws)]
 
                     with st.spinner("Running baseline plan and calculating chip values..."):
                         # Step 1: Run baseline plan ONCE (no chips)
@@ -5763,7 +5780,7 @@ def main():
                                 selling_prices_api=team_data_chip.get("selling_prices_api", {}),
                                 xpts_map=xpts_map,
                                 planning_gw_id=planning_gw_id,
-                                n_gws=6,
+                                n_gws=n_planning_gws,
                                 chip_schedule={},
                                 team_fixture_counts=team_fixture_counts,
                             )
@@ -5879,7 +5896,7 @@ def main():
                                     selling_prices_api=team_data_chip.get("selling_prices_api", {}),
                                     xpts_map=xpts_map,
                                     planning_gw_id=planning_gw_id,
-                                    n_gws=6,
+                                    n_gws=n_planning_gws,
                                     chip_schedule={wc_gw: "wildcard"},
                                     team_fixture_counts=team_fixture_counts,
                                 )
