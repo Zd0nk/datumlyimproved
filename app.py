@@ -1486,7 +1486,19 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
             else:
                 rotation_factor = 0.0
 
-        availability = fitness * rotation_factor
+        # For nailed-and-fit players, the two signals largely overlap (a player
+        # who starts >80% of recent games with no injury flag has passed both
+        # checks already). Multiplying then double-discounts the small slice of
+        # rotation noise — a Pep-rotated nailed starter at start_rate 0.85
+        # gets availability 0.85 multiplicatively, knocking 15% off attacking
+        # projections. For these specific players, max() better reflects that
+        # when they DO start they play their typical minutes. Genuine fringe
+        # players (start_rate <= 0.8) and any flagged player keep the strict
+        # multiplicative discount so injuries and real rotation still bite.
+        if rot and rot.get("start_rate", 0) > 0.8 and fitness >= 1.0:
+            availability = max(fitness, rotation_factor)
+        else:
+            availability = fitness * rotation_factor
 
         # Expected minutes: E[mins] = E[mins | played] * P(plays). Three branches:
         #   1. rot exists with recent appearances → use per-appearance mins × P(start).
