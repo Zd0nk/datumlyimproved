@@ -486,26 +486,49 @@ st.markdown("""
     .sb-brand svg { height: 56px; width: auto; max-width: 100%; }
 
     /* HTML-link nav (replaces emoji+button pattern) */
-    .sb-nav { display: flex; flex-direction: column; gap: 1px; }
-    .sb-nav-item {
+    .sb-nav { display: flex; flex-direction: column; gap: 2px; }
+    .sb-nav-item,
+    .sb-nav-item:link,
+    .sb-nav-item:visited {
+        position: relative;
         display: flex; align-items: center; gap: 11px;
-        padding: 8px 12px;
+        padding: 7px 12px 7px 14px;
         font-size: 0.86rem; font-weight: 500;
         color: var(--text-muted);
+        background: transparent;
         border-radius: 6px;
         text-decoration: none;
-        transition: background 100ms ease, color 100ms ease;
+        cursor: pointer;
+        transition: background 120ms ease, color 120ms ease;
     }
-    .sb-nav-item:hover { background: var(--surface-2); color: var(--text); }
-    .sb-nav-item.active {
+    .sb-nav-item:hover {
         background: var(--surface-2);
         color: var(--text);
+    }
+    .sb-nav-item:hover .sb-nav-icon { opacity: 1; color: var(--text); }
+    .sb-nav-item.active,
+    .sb-nav-item.active:link,
+    .sb-nav-item.active:visited {
+        color: var(--text);
         font-weight: 600;
+        background: var(--surface-2);
+    }
+    /* Subtle brand accent bar on the active item — communicates selection
+       without a heavy background block. */
+    .sb-nav-item.active::before {
+        content: "";
+        position: absolute;
+        left: 4px; top: 8px; bottom: 8px;
+        width: 2px;
+        background: var(--brand);
+        border-radius: 2px;
     }
     .sb-nav-icon {
         display: inline-flex; align-items: center; justify-content: center;
         width: 16px; height: 16px; flex-shrink: 0;
+        color: var(--text-muted);
         opacity: 0.85;
+        transition: color 120ms ease, opacity 120ms ease;
     }
     .sb-nav-item.active .sb-nav-icon { opacity: 1; color: var(--brand); }
     .sb-nav-icon svg { width: 16px; height: 16px; }
@@ -515,17 +538,6 @@ st.markdown("""
         padding: 14px 8px 8px;
     }
     .sb-spacer { height: 14px; border-top: 1px solid var(--border); margin-top: 14px; }
-    .sb-nav-item {
-        display: flex; align-items: center;
-        padding: 8px 12px;
-        font-size: 0.86rem; font-weight: 500;
-        color: var(--text);
-        border-radius: 6px;
-        margin: 2px 0;
-        background: var(--surface-2);
-        cursor: default;
-    }
-    .sb-nav-item.active { font-weight: 600; }
     [data-testid="stSidebar"] .stButton > button {
         background: transparent !important;
         border: none !important;
