@@ -473,7 +473,7 @@ st.markdown("""
     [data-testid="stSidebar"] {
         background: var(--bg-2) !important;
         border-right: 1px solid var(--border) !important;
-        min-width: 260px !important;
+        min-width: 285px !important;
     }
     /* Hide Streamlit's default sidebar collapse control. We render a
        permanent custom nav, and recent Streamlit versions ship a collapse
@@ -489,15 +489,15 @@ st.markdown("""
     button[title*="keyboard_double"] {
         display: none !important;
     }
-    [data-testid="stSidebar"] > div:first-child { padding-top: 8px; }
-    [data-testid="stSidebar"] [data-testid="stSidebarContent"] { padding: 12px 14px; }
+    [data-testid="stSidebar"] > div:first-child { padding-top: 0; }
+    [data-testid="stSidebar"] [data-testid="stSidebarContent"] { padding: 4px 8px 12px; }
     .sb-brand {
         display: flex; align-items: center; justify-content: center;
-        padding: 18px 12px 26px;
+        padding: 6px 8px 22px;
         border-bottom: 1px solid var(--border);
-        margin-bottom: 14px;
+        margin-bottom: 12px;
     }
-    .sb-brand svg { height: 80px; width: auto; max-width: 100%; display: block; margin: 0 auto; }
+    .sb-brand svg { height: 96px; width: auto; max-width: 100%; display: block; margin: 0 auto; }
 
     /* HTML-link nav (replaces emoji+button pattern) */
     .sb-nav { display: flex; flex-direction: column; gap: 2px; }
