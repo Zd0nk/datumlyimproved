@@ -3411,10 +3411,19 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
                     if transfer["xpts_gain"] < 0.3:
                         break  # marginal gain, stop
             else:
-                # Each hit costs exactly 4 points and the xpts_gain is over the
-                # full horizon, so a flat 4-pt break-even is the correct threshold.
-                # Escalating thresholds artificially refused profitable double hits.
-                if transfer["xpts_gain"] < 4.0:
+                # Hit threshold: only take the hit if the THIS-GW gain alone
+                # is >= 4. The naive "horizon gain > 4" comparison was wrong —
+                # the real alternative to a hit is "wait one GW and do this
+                # transfer for free with next week's FT", which only loses
+                # ONE GW of advantage, not the whole horizon. The condition
+                # for hit to beat wait reduces to:
+                #     In_thisGW - Out_thisGW >= hit_cost (4)
+                # because every future GW is equal under both branches (we
+                # own the new player either way). Using horizon gain caused
+                # the planner to recommend -8 / -12 hits for marginal
+                # multi-week advantages a free transfer next GW would
+                # capture without paying.
+                if transfer["xpts_gw_gain"] < 4.0:
                     break
                 total_hit += 4
 
