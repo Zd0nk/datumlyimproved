@@ -1146,6 +1146,17 @@ def compute_rotation_risk(player_gw_data, current_gw_id, n_recent=7):
         # Blend weighted rate with overall rate
         projected_start_prob = weighted_start_rate * 0.7 + start_rate * 0.3
 
+        # Phase-in / phase-out adjustment: when the recent half differs strongly
+        # from the older half, the player's role has clearly changed within the
+        # window. The flat 7-GW signal is stale in that case, so weight the
+        # recent half more heavily. Catches players newly broken into the XI
+        # (so old benchings don't drag them down) and players being phased out
+        # (so old starts don't prop them up).
+        if abs(trend) > 0.3 and len(recent) >= 4:
+            recent_half = recent[:len(recent)//2]
+            recent_half_rate = sum(1 for g in recent_half if g["started"]) / len(recent_half)
+            projected_start_prob = recent_half_rate * 0.6 + projected_start_prob * 0.4
+
         # Classify risk
         if projected_start_prob >= 0.85:
             risk = "low"
@@ -1669,7 +1680,14 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
             # This gives a ~40% swing which matches real FPL points variance by fixture
             raw_scale = (opp_def_str * 0.55 + team_atk_str * 0.25 + 0.20)
             scale = raw_scale  # no dampening — let fixtures matter
-            home_boost = 1.08 if fix["home"] else 0.96
+            # Home advantage is already baked into live (fixture-specific) bookmaker
+            # odds — applying another multiplier on top double-counts venue. Only
+            # add the boost on the season-average fallback path where odds are
+            # venue-agnostic.
+            if live_fixture:
+                home_boost = 1.0
+            else:
+                home_boost = 1.08 if fix["home"] else 0.96
 
             # Separate penalty xG from open-play xG before scaling
             # Penalties are fixture-independent (~0.76 xG regardless of opponent)
@@ -1762,7 +1780,13 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
             xpts += cs_prob * PTS_CS.get(pos, 0) * full_game_prob
 
             # Bonus points estimate (proportional to involvement)
-            xpts += PTS_BONUS_AVG * play_prob
+            # Bonus scales with the rest of the player's xPts, since BPS rewards
+            # goals/assists/CS/saves heavily. The previous flat PTS_BONUS_AVG ×
+            # play_prob over-credited low-impact nailed starters and under-credited
+            # big-haul games. Calibration: ~3.5 pts pre-bonus → factor 1.0 (neutral),
+            # appearance-only player → factor ~0.55, big haul → cap at 1.7.
+            bonus_factor = max(0.4, min(xpts / 3.5, 1.7))
+            xpts += PTS_BONUS_AVG * play_prob * bonus_factor
 
             # Goals conceded penalty for GK/DEF
             # FPL rule: -1 point per 2 goals conceded (i.e. -0.5 per goal) from goal 1
@@ -1807,16 +1831,22 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
 
                 raw_prob = defcon_per90 / 2.0  # 0-1 scale
 
+                # Curve choice: ** 0.7 sits between sqrt (** 0.5, too generous
+                # for moderate raw_probs) and linear. It preserves elite earners
+                # near the cap while pulling mid-tier defenders down toward
+                # realistic per-fixture DefCon expectations.
+                curved = raw_prob ** 0.7
+
                 if pos == 2:  # DEF
-                    # Conservative but fair — CBs are the primary DefCon earners
-                    defcon_prob = min((raw_prob ** 0.5) * 0.6, 0.70)
+                    # CBs are the primary DefCon earners — top defenders hit
+                    # threshold 60-70% of games, recalibrated to land near cap.
+                    defcon_prob = min(curved * 0.7, 0.70)
                 elif pos == 3:  # MID
-                    # Much more conservative — only elite CDMs earn DC regularly
-                    # Most MIDs (attackers, wingers, AMs) almost never hit 12 CBIRT
-                    defcon_prob = min((raw_prob ** 0.5) * 0.35, 0.40)
+                    # Only elite CDMs earn DC regularly; attackers/wingers rarely.
+                    defcon_prob = min(curved * 0.42, 0.40)
                 else:  # FWD (pos == 4)
-                    # Extremely rare — almost no forwards hit 12 CBIRT
-                    defcon_prob = min((raw_prob ** 0.5) * 0.15, 0.20)
+                    # Almost no forwards hit 12 CBIRT.
+                    defcon_prob = min(curved * 0.20, 0.20)
 
                 # Mild fixture adjustment
                 defcon_prob *= (0.9 + 0.1 * opp_atk_str)
@@ -1859,7 +1889,7 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
                     "goal_pts": round(adj_xg * expected_90s * PTS_GOAL.get(pos, 4), 2),
                     "assist_pts": round(adj_xa * expected_90s * PTS_ASSIST, 2),
                     "cs_pts": round(cs_prob * PTS_CS.get(pos, 0) * full_game_prob, 2),
-                    "bonus_pts": round(PTS_BONUS_AVG * play_prob, 2),
+                    "bonus_pts": round(PTS_BONUS_AVG * play_prob * bonus_factor, 2),
                     "conceded_pts": round(-(expected_conceded * 0.5 * full_game_prob), 2) if pos in [1, 2] else 0,
                     "defcon_pts": round(defcon_xpts, 2) if defcon_per90 > 0 and pos in [2, 3, 4] and nineties >= 3 else 0,
                     "total": round(max(xpts, 0), 2),
