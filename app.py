@@ -2763,14 +2763,22 @@ def solve_best_xi_for_gw(squad_df, xpts_map, gw_id):
 def find_best_single_transfer_for_gw(squad_df, all_players_df, bank,
                                       purchase_prices, selling_prices_api,
                                       xpts_map, gw_id, exclude_ids=None,
-                                      horizon_end=None):
+                                      horizon_end=None, bb_gws=None):
     """
     Find the single best transfer considering the REMAINING HORIZON.
-    
+
     For a GW31 transfer with horizon ending at GW35:
     - Compare players on sum(xPts from GW31 to GW35), not just GW31
     - This ensures transfers are forward-looking, not myopic
-    
+
+    bb_gws: optional set of GW ids in the horizon where Bench Boost is
+        scheduled. On a BB GW all 15 players score, not just the 11 XI,
+        so the BB GW's contribution to a transfer's value is up-weighted.
+        This biases recommendations toward picks that strengthen the squad
+        as a whole (including bench-likely positions) when BB is queued —
+        otherwise the planner would propose the same XI-focused transfers
+        regardless of whether BB is on the schedule.
+
     Also returns the single-GW gain for display purposes.
     """
     if squad_df is None or len(squad_df) == 0:
@@ -2778,11 +2786,13 @@ def find_best_single_transfer_for_gw(squad_df, all_players_df, bank,
 
     if exclude_ids is None:
         exclude_ids = set()
-    
+    if bb_gws is None:
+        bb_gws = set()
+
     # Default horizon: 6 GWs from this GW
     if horizon_end is None:
         horizon_end = gw_id + 6
-    
+
     horizon_gws = list(range(gw_id, horizon_end))
 
     squad_ids = set(squad_df["id"].tolist()) | exclude_ids
@@ -2792,14 +2802,25 @@ def find_best_single_transfer_for_gw(squad_df, all_players_df, bank,
         (all_players_df["status"].isin(["a", "d", ""]))
     ].copy()
 
+    # BB up-weight rationale: in a normal GW only 11 of 15 score, so the
+    # current per-player horizon sum already over-credits non-XI weeks. On a
+    # BB GW all 15 score for certain. Using 2x captures both effects in the
+    # right direction without needing an explicit XI-likelihood model:
+    #  - For nailed starters: BB GW slightly over-counted (acceptable)
+    #  - For bench-likely upgrades: BB GW correctly dominates the gain calc
+    BB_GW_WEIGHT = 2.0
+
+    def _horizon_value(pid):
+        total = 0.0
+        for g in horizon_gws:
+            xp = xpts_map.get(pid, {}).get(g, 0)
+            total += xp * (BB_GW_WEIGHT if g in bb_gws else 1.0)
+        return total
+
     # Remaining horizon xPts (what matters for the transfer decision)
     squad_df = squad_df.copy()
-    squad_df["xpts_horizon"] = squad_df["id"].map(
-        lambda pid: sum(xpts_map.get(pid, {}).get(gw, 0) for gw in horizon_gws)
-    )
-    available["xpts_horizon"] = available["id"].map(
-        lambda pid: sum(xpts_map.get(pid, {}).get(gw, 0) for gw in horizon_gws)
-    )
+    squad_df["xpts_horizon"] = squad_df["id"].map(_horizon_value)
+    available["xpts_horizon"] = available["id"].map(_horizon_value)
     
     # Also get single-GW xPts for display
     squad_df["xpts_gw"] = squad_df["id"].map(lambda pid: xpts_map.get(pid, {}).get(gw_id, 0))
@@ -3311,6 +3332,15 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
         # The horizon shrinks as we move through GWs
         horizon_end = planning_gw_id + n_gws
 
+        # Bench Boost GWs in the remaining horizon — passed to the transfer
+        # search so it knows to up-weight those weeks (all 15 score, not just
+        # XI). Without this, transfer recommendations are identical regardless
+        # of whether BB is queued.
+        bb_gws_in_horizon = {
+            g for g, c in chip_schedule.items()
+            if c == "bench_boost" and gw <= g < horizon_end
+        }
+
         # Filter out banned players from the candidate pool
         transfer_pool = all_players_df[~all_players_df["id"].isin(banned_ids)] if banned_ids else all_players_df
 
@@ -3392,6 +3422,7 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
                 current_purchase, current_selling, xpts_map, gw,
                 exclude_ids=recently_sold | transfer_exclude,
                 horizon_end=horizon_end,
+                bb_gws=bb_gws_in_horizon,
             )
 
             if transfer is None:
