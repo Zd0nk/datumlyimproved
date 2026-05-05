@@ -695,6 +695,7 @@ st.markdown("""
     .pitch-shirt-container { display: inline-flex; flex-direction: column; align-items: center; position: relative; margin: 0 auto; }
     .pitch-shirt-xpts { position: absolute; top: 18px; left: 50%; transform: translateX(-50%); font-weight: 700; font-size: 0.72rem; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,0.5); z-index: 2; }
     .pitch-name { font-size: 0.72rem; font-weight: 500; color: var(--text); margin-top: 5px; line-height: 1.15; }
+    .pitch-opp { font-size: 0.66rem; color: var(--text-muted); font-weight: 500; margin-top: 2px; line-height: 1.1; }
     .pitch-price { font-size: 0.6rem; color: var(--text-faint); font-weight: 400; }
 
     /* ---- Section headers (within tab content) ---- */
@@ -3498,6 +3499,21 @@ def get_formation_str(xi_df):
     return f"{d}-{m}-{f}"
 
 
+def format_next_opponents(team_id, gw_id, upcoming_map, teams_dict):
+    """Return the player's opponent(s) for a specific GW as a short label.
+    Single fixture: "vs WOL (H)". Double GW: "vs WOL (H), LEE (A)". Blank: "BGW".
+    """
+    fixtures = [f for f in upcoming_map.get(team_id, []) if f.get("gw") == gw_id]
+    if not fixtures:
+        return "BGW"
+    parts = []
+    for fix in fixtures:
+        opp = teams_dict.get(fix["opp_id"], {}).get("short_name", "?")
+        venue = "H" if fix["home"] else "A"
+        parts.append(f"{opp} ({venue})")
+    return "vs " + ", ".join(parts)
+
+
 def render_fdr(upcoming, teams):
     """Render fixture difficulty badges."""
     badges = []
@@ -3920,7 +3936,14 @@ def main():
                     starters = my_squad[my_squad["is_starter"]].sort_values(
                         ["pos_id", "xpts_total"], ascending=[True, False]
                     )
-                    bench = my_squad[~my_squad["is_starter"]].sort_values("pos_id")
+                    # Bench order: GK always leftmost (so the auto-sub fallback
+                    # is in its conventional slot), then outfield players sorted
+                    # by next-GW xPts descending (highest-EV substitute first).
+                    bench = my_squad[~my_squad["is_starter"]].copy()
+                    bench["_gk_first"] = (bench["pos_id"] != 1).astype(int)
+                    bench = bench.sort_values(
+                        ["_gk_first", "xpts_next_gw"], ascending=[True, False]
+                    ).drop(columns="_gk_first")
 
                     # Pitch view of starters
                     for pid_val, plabel in [(4, "Forwards"), (3, "Midfielders"), (2, "Defenders"), (1, "Goalkeeper")]:
@@ -3933,8 +3956,9 @@ def main():
                                 is_cap = p.get("is_captain", False)
                                 cap_badge = " (C)" if is_cap else (" (V)" if p.get("is_vice", False) else "")
                                 shirt_svg = make_shirt_svg(p["team"], f"{p['xpts_next_gw']:.1f}", is_gk=is_gk, is_captain=is_cap, player_name=p.get("name", ""), team_code=int(p.get("team_code", 0) or 0))
+                                opp_str = format_next_opponents(p["team_id"], planning_gw_id, upcoming_map, teams)
                                 with cols[i]:
-                                    html = f'<div style="text-align:center;">{shirt_svg}<div class="pitch-name">{p["name"]}{cap_badge}</div><div class="pitch-price">£{p["price"]:.1f}m · {p["xpts_total"]:.1f} xPts</div></div>'
+                                    html = f'<div style="text-align:center;">{shirt_svg}<div class="pitch-name">{p["name"]}{cap_badge}</div><div class="pitch-opp">{opp_str}</div><div class="pitch-price">£{p["price"]:.1f}m · {p["xpts_total"]:.1f} xPts</div></div>'
                                     st.markdown(html, unsafe_allow_html=True)
 
                     if len(bench) > 0:
@@ -3943,8 +3967,9 @@ def main():
                         for i, (_, p) in enumerate(bench.iterrows()):
                             is_gk = (p["pos_id"] == 1)
                             shirt_svg = make_shirt_svg(p["team"], f"{p['xpts_next_gw']:.1f}", is_gk=is_gk, width=44, height=44, player_name=p.get("name", ""), team_code=int(p.get("team_code", 0) or 0))
+                            opp_str = format_next_opponents(p["team_id"], planning_gw_id, upcoming_map, teams)
                             with bcols[i]:
-                                html = f'<div style="text-align:center;opacity:0.6;">{shirt_svg}<div class="pitch-name">{p["name"]}</div><div class="pitch-price">{p["pos"]} · £{p["price"]:.1f}m</div></div>'
+                                html = f'<div style="text-align:center;opacity:0.6;">{shirt_svg}<div class="pitch-name">{p["name"]}</div><div class="pitch-opp">{opp_str}</div><div class="pitch-price">{p["pos"]} · £{p["price"]:.1f}m</div></div>'
                                 st.markdown(html, unsafe_allow_html=True)
 
                     st.markdown("")
@@ -5173,18 +5198,26 @@ def main():
                             for i, (_, p) in enumerate(pp.iterrows()):
                                 is_gk = (p["pos_id"] == 1)
                                 shirt_svg = make_shirt_svg(p["team"], f"{p['xpts_next_gw']:.1f}", is_gk=is_gk, player_name=p.get("name", ""), team_code=int(p.get("team_code", 0) or 0))
+                                opp_str = format_next_opponents(p["team_id"], planning_gw_id, upcoming_map, teams)
                                 with cols[i]:
-                                    html = f'<div style="text-align:center;">{shirt_svg}<div class="pitch-name">{p["name"]}</div><div class="pitch-price">£{p["price"]:.1f}m · {p["form_str"]}</div></div>'
+                                    html = f'<div style="text-align:center;">{shirt_svg}<div class="pitch-name">{p["name"]}</div><div class="pitch-opp">{opp_str}</div><div class="pitch-price">£{p["price"]:.1f}m · {p["form_str"]}</div></div>'
                                     st.markdown(html, unsafe_allow_html=True)
 
                 if bench is not None and len(bench) > 0:
                     st.markdown("**Bench**")
+                    # GK leftmost, outfielders sorted by next-GW xPts desc
+                    bench = bench.copy()
+                    bench["_gk_first"] = (bench["pos_id"] != 1).astype(int)
+                    bench = bench.sort_values(
+                        ["_gk_first", "xpts_next_gw"], ascending=[True, False]
+                    ).drop(columns="_gk_first")
                     bcols = st.columns(len(bench))
                     for i, (_, p) in enumerate(bench.iterrows()):
                         is_gk = (p["pos_id"] == 1)
                         shirt_svg = make_shirt_svg(p["team"], f"{p['xpts_next_gw']:.1f}", is_gk=is_gk, width=44, height=44, player_name=p.get("name", ""), team_code=int(p.get("team_code", 0) or 0))
+                        opp_str = format_next_opponents(p["team_id"], planning_gw_id, upcoming_map, teams)
                         with bcols[i]:
-                            html = f'<div style="text-align:center;opacity:0.65;">{shirt_svg}<div class="pitch-name">{p["name"]}</div><div class="pitch-price">{p["pos"]} · £{p["price"]:.1f}m</div></div>'
+                            html = f'<div style="text-align:center;opacity:0.65;">{shirt_svg}<div class="pitch-name">{p["name"]}</div><div class="pitch-opp">{opp_str}</div><div class="pitch-price">{p["pos"]} · £{p["price"]:.1f}m</div></div>'
                             st.markdown(html, unsafe_allow_html=True)
 
                 st.markdown("")
