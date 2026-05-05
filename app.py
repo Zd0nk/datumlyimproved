@@ -473,8 +473,16 @@ st.markdown("""
     [data-testid="stSidebar"] {
         background: var(--bg-2) !important;
         border-right: 1px solid var(--border) !important;
-        min-width: 285px !important;
+        min-width: 320px !important;
     }
+    /* Aggressive zero-out of all sidebar wrappers above our brand area —
+       Streamlit ships a few stacked containers (stSidebarHeader,
+       stSidebarUserContent, stSidebarContent) that each contribute a few px
+       of top padding, which together push the brand visibly down. */
+    [data-testid="stSidebarHeader"] {
+        padding: 0 !important; min-height: 0 !important; height: 0 !important;
+    }
+    [data-testid="stSidebarUserContent"] { padding-top: 0 !important; }
     /* Hide Streamlit's default sidebar collapse control. We render a
        permanent custom nav, and recent Streamlit versions ship a collapse
        button whose Material-Icons ligature ("keyboard_double_arrow_left")
@@ -489,15 +497,15 @@ st.markdown("""
     button[title*="keyboard_double"] {
         display: none !important;
     }
-    [data-testid="stSidebar"] > div:first-child { padding-top: 0; }
-    [data-testid="stSidebar"] [data-testid="stSidebarContent"] { padding: 4px 8px 12px; }
+    [data-testid="stSidebar"] > div:first-child { padding-top: 0 !important; }
+    [data-testid="stSidebar"] [data-testid="stSidebarContent"] { padding: 0 4px 12px !important; }
     .sb-brand {
         display: flex; align-items: center; justify-content: center;
-        padding: 6px 8px 22px;
+        padding: 0 4px 20px;
         border-bottom: 1px solid var(--border);
-        margin-bottom: 12px;
+        margin: 0 0 12px;
     }
-    .sb-brand svg { height: 96px; width: auto; max-width: 100%; display: block; margin: 0 auto; }
+    .sb-brand svg { height: 120px; width: auto; max-width: 100%; display: block; margin: 0 auto; }
 
     /* HTML-link nav (replaces emoji+button pattern) */
     .sb-nav { display: flex; flex-direction: column; gap: 2px; }
