@@ -3533,14 +3533,19 @@ def get_formation_str(xi_df):
 def format_next_opponents(team_id, gw_id, upcoming_map, teams_dict):
     """Return the player's opponent(s) for a specific GW as a short label.
     Single fixture: "vs WOL (H)". Double GW: "vs WOL (H), LEE (A)". Blank: "BGW".
+
+    Note: there are two upcoming-fixture dicts in the codebase with different
+    schemas — build_xpts_model uses "opp_id", enrich_data uses "opp". Read
+    whichever key is present so this helper works against either.
     """
     fixtures = [f for f in upcoming_map.get(team_id, []) if f.get("gw") == gw_id]
     if not fixtures:
         return "BGW"
     parts = []
     for fix in fixtures:
-        opp = teams_dict.get(fix["opp_id"], {}).get("short_name", "?")
-        venue = "H" if fix["home"] else "A"
+        opp_id = fix.get("opp_id", fix.get("opp"))
+        opp = teams_dict.get(opp_id, {}).get("short_name", "?")
+        venue = "H" if fix.get("home") else "A"
         parts.append(f"{opp} ({venue})")
     return "vs " + ", ".join(parts)
 
