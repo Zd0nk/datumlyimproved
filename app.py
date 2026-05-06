@@ -5478,9 +5478,11 @@ def main():
                                     "difficulty": f.get("team_a_difficulty", 3)
                                 })
 
-                    # Temporarily monkey-patch the upcoming map in the model
-                    # by calling build_xpts_model with a shifted current_gw_id
-                    bt_xpts_map, _ = build_xpts_model(
+                    # Rebuild the xPts model with the past GW as "current" so
+                    # we get retroactive predictions. CAPTURE the breakdown
+                    # too — we need per-component projections to diagnose
+                    # which formulas are leaking error.
+                    bt_xpts_map, bt_xpts_breakdown = build_xpts_model(
                         df, team_odds, teams, fixtures_list, min_bt_gw,
                         form_xg_data=None,
                         team_fixture_counts=team_fixture_counts,
@@ -5488,6 +5490,53 @@ def main():
                         live_odds=None,
                         rotation_data=None,
                     )
+
+                # Helper: convert FPL live stats to component-level actual points.
+                # Mirrors FPL scoring rules so we can compare against the model's
+                # predicted breakdown (appearance / goals / assists / cs / bonus /
+                # conceded / defcon / saves) in like-for-like units.
+                def _actual_component_pts(stats, pos_id):
+                    mins = stats.get("minutes", 0) or 0
+                    if mins >= 60:
+                        appearance = 2
+                    elif mins >= 1:
+                        appearance = 1
+                    else:
+                        appearance = 0
+                    goals_pts = (stats.get("goals_scored", 0) or 0) * PTS_GOAL.get(pos_id, 4)
+                    assists_pts = (stats.get("assists", 0) or 0) * 3
+                    cs_pts = (stats.get("clean_sheets", 0) or 0) * PTS_CS.get(pos_id, 0) if mins >= 60 else 0
+                    bonus_pts = stats.get("bonus", 0) or 0
+                    if pos_id in (1, 2):
+                        conceded_pts = -((stats.get("goals_conceded", 0) or 0) // 2)
+                    else:
+                        conceded_pts = 0
+                    if pos_id == 1:
+                        saves_pts = (stats.get("saves", 0) or 0) // 3
+                    else:
+                        saves_pts = 0
+                    dc_value = stats.get("defensive_contribution", 0) or 0
+                    if pos_id == 2 and dc_value >= 10:
+                        defcon_pts = 2
+                    elif pos_id in (3, 4) and dc_value >= 12:
+                        defcon_pts = 2
+                    else:
+                        defcon_pts = 0
+                    return {
+                        "appearance": appearance,
+                        "goals": goals_pts,
+                        "assists": assists_pts,
+                        "cs": cs_pts,
+                        "bonus": bonus_pts,
+                        "conceded": conceded_pts,
+                        "defcon": defcon_pts,
+                        "saves": saves_pts,
+                    }
+
+                # Component records: one per (player, GW) with predicted and
+                # actual values for each xPts component. Drives the new
+                # per-component MAE / correlation table.
+                component_records = []
 
                 with st.spinner("Fetching actual points data..."):
                     for gw_event in completed_gws:
@@ -5505,13 +5554,14 @@ def main():
                             gw_errors = []
                             for el in elements:
                                 pid = el["id"]
-                                actual_pts = el.get("stats", {}).get("total_points", 0)
+                                stats = el.get("stats", {})
+                                actual_pts = stats.get("total_points", 0)
                                 predicted_pts = bt_xpts_map.get(pid, {}).get(gw_id, None)
 
                                 if predicted_pts is None or predicted_pts == 0:
                                     continue
 
-                                mins = el.get("stats", {}).get("minutes", 0)
+                                mins = stats.get("minutes", 0)
                                 if mins == 0:
                                     continue
 
@@ -5533,6 +5583,39 @@ def main():
                                     "Actual": actual_pts,
                                     "Error": round(error, 1),
                                     "Abs Error": round(abs_error, 1),
+                                })
+
+                                # Per-component capture: only when we have the
+                                # predicted breakdown stored for this (pid, gw).
+                                # Note: for DGW players the breakdown only stores
+                                # the FIRST fixture's components, so the per-
+                                # component view under-represents DGW prediction
+                                # — until that bug is fixed, treat DGW component
+                                # numbers as a lower bound.
+                                bd = bt_xpts_breakdown.get(pid, {}).get(gw_id)
+                                if bd is None:
+                                    continue
+                                pos_id = int(p["pos_id"])
+                                actual_comp = _actual_component_pts(stats, pos_id)
+                                component_records.append({
+                                    "GW": gw_id,
+                                    "Pos": p["pos"],
+                                    "appearance_pred": bd.get("appearance_pts", 0),
+                                    "appearance_actual": actual_comp["appearance"],
+                                    "goals_pred": bd.get("goal_pts", 0),
+                                    "goals_actual": actual_comp["goals"],
+                                    "assists_pred": bd.get("assist_pts", 0),
+                                    "assists_actual": actual_comp["assists"],
+                                    "cs_pred": bd.get("cs_pts", 0),
+                                    "cs_actual": actual_comp["cs"],
+                                    "bonus_pred": bd.get("bonus_pts", 0),
+                                    "bonus_actual": actual_comp["bonus"],
+                                    "conceded_pred": bd.get("conceded_pts", 0),
+                                    "conceded_actual": actual_comp["conceded"],
+                                    "defcon_pred": bd.get("defcon_pts", 0),
+                                    "defcon_actual": actual_comp["defcon"],
+                                    "predicted_total": predicted_pts,
+                                    "actual_total": actual_pts,
                                 })
 
                             if gw_errors:
@@ -5609,6 +5692,76 @@ def main():
                     ].reset_index(drop=True)
                     best.index += 1
                     st.dataframe(best, use_container_width=True)
+
+                    # Per-component error breakdown — tells us WHICH formula
+                    # (goals / assists / CS / bonus / DefCon / etc.) is leaking
+                    # the most error so we know where to focus model work.
+                    if component_records:
+                        comp_records_df = pd.DataFrame(component_records)
+                        components = [
+                            ("Appearance", "appearance_pred", "appearance_actual"),
+                            ("Goals", "goals_pred", "goals_actual"),
+                            ("Assists", "assists_pred", "assists_actual"),
+                            ("Clean Sheets", "cs_pred", "cs_actual"),
+                            ("Bonus", "bonus_pred", "bonus_actual"),
+                            ("Conceded", "conceded_pred", "conceded_actual"),
+                            ("DefCon", "defcon_pred", "defcon_actual"),
+                        ]
+                        comp_rows = []
+                        for label, pcol, acol in components:
+                            pred = comp_records_df[pcol].astype(float)
+                            actual = comp_records_df[acol].astype(float)
+                            errors = (pred - actual).abs()
+                            corr = pred.corr(actual) if pred.std() > 0 and actual.std() > 0 else 0.0
+                            comp_rows.append({
+                                "Component": label,
+                                "Avg Predicted": round(pred.mean(), 2),
+                                "Avg Actual": round(actual.mean(), 2),
+                                "Bias (pred - actual)": round((pred - actual).mean(), 2),
+                                "MAE": round(errors.mean(), 2),
+                                "Correlation": round(corr, 3),
+                            })
+                        comp_table = pd.DataFrame(comp_rows)
+                        st.markdown("")
+                        st.markdown("### Per-Component Accuracy")
+                        st.caption(
+                            "MAE shows which formula is leaking the most error. Bias > 0 means we "
+                            "over-project that component; bias < 0 means we under-project. Correlation "
+                            "tells us whether ordering is right within the component (1.0 = perfect)."
+                        )
+                        st.dataframe(comp_table, use_container_width=True)
+
+                    # Error by predicted-xPts decile — where in the distribution
+                    # is the model most wrong? If error grows with predicted xPts
+                    # (top-end blow-ups), the optimizer's picks are unreliable
+                    # in the very range it cares about most.
+                    st.markdown("")
+                    st.markdown("### Error by Predicted Decile")
+                    st.caption(
+                        "Players bucketed by predicted xPts. Bigger MAE in the top decile means "
+                        "the model is least accurate exactly where the optimizer makes its picks."
+                    )
+                    decile_df = comp_df.copy()
+                    decile_df["Decile"] = pd.qcut(
+                        decile_df["Predicted"], q=10, labels=False, duplicates="drop"
+                    )
+                    decile_table = decile_df.groupby("Decile").agg(
+                        n=("Player", "count"),
+                        avg_predicted=("Predicted", "mean"),
+                        avg_actual=("Actual", "mean"),
+                        bias=("Error", "mean"),
+                        mae=("Abs Error", "mean"),
+                    ).round(2).reset_index()
+                    decile_table["Decile"] = decile_table["Decile"].astype(int).map(
+                        lambda d: f"D{d + 1} (lowest)" if d == 0
+                        else f"D{d + 1} (highest)" if d == decile_table["Decile"].max()
+                        else f"D{d + 1}"
+                    )
+                    decile_table.columns = [
+                        "Decile", "Players", "Avg Predicted", "Avg Actual",
+                        "Bias (actual - pred)", "MAE",
+                    ]
+                    st.dataframe(decile_table, use_container_width=True)
 
                     # Direction accuracy — did we correctly rank players?
                     st.markdown("")
