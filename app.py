@@ -2779,13 +2779,20 @@ def find_best_single_transfer_for_gw(squad_df, all_players_df, bank,
     - Compare players on sum(xPts from GW31 to GW35), not just GW31
     - This ensures transfers are forward-looking, not myopic
 
+    XI-LIKELIHOOD DISCOUNTING: in a normal GW only 11 of 15 squad players
+    score. The previous "every player scores every GW" sum systematically
+    over-credited bench-likely positions. We now rank squad players within
+    their position by xpts_horizon and apply a probability-of-starting
+    discount: a top-tier DEF (rank 0) gets ~97% credit on non-BB weeks; the
+    5th DEF (rank 4) gets ~40% — reflecting that they only score when they
+    crack the XI. Each candidate's likelihood is computed for the slot they'd
+    occupy post-transfer (their rank vs. the OTHER same-position squad
+    members). On BB GWs the discount is bypassed (all 15 score).
+
     bb_gws: optional set of GW ids in the horizon where Bench Boost is
-        scheduled. On a BB GW all 15 players score, not just the 11 XI,
-        so the BB GW's contribution to a transfer's value is up-weighted.
-        This biases recommendations toward picks that strengthen the squad
-        as a whole (including bench-likely positions) when BB is queued —
-        otherwise the planner would propose the same XI-focused transfers
-        regardless of whether BB is on the schedule.
+        scheduled. The XI-likelihood discount is skipped for these GWs,
+        making bench-strengthening transfers correctly attractive when BB
+        is queued.
 
     Also returns the single-GW gain for display purposes.
     """
@@ -2803,6 +2810,19 @@ def find_best_single_transfer_for_gw(squad_df, all_players_df, bank,
 
     horizon_gws = list(range(gw_id, horizon_end))
 
+    # XI-likelihood by (position, rank within position). Probabilities sum to
+    # the typical formation distribution: ~4 DEF, ~3.83 MID, ~2.17 FWD, 1 GK
+    # averaged across 3-5-2 / 4-4-2 / 4-3-3 / 3-4-3 / 5-4-1 / 5-3-2 setups.
+    XI_LIKELIHOOD = {
+        1: [0.95, 0.05],                           # GK (1 of 2 starts)
+        2: [0.97, 0.95, 0.90, 0.78, 0.40],         # DEF (typically 4 of 5)
+        3: [0.97, 0.95, 0.85, 0.70, 0.36],         # MID (typically 4 of 5)
+        4: [0.97, 0.80, 0.40],                     # FWD (typically 2 of 3)
+    }
+    def _likelihood(pos, rank):
+        ranks = XI_LIKELIHOOD.get(int(pos), [0.7])
+        return ranks[rank] if 0 <= rank < len(ranks) else 0.0
+
     squad_ids = set(squad_df["id"].tolist()) | exclude_ids
     available = all_players_df[
         (~all_players_df["id"].isin(squad_ids)) &
@@ -2810,45 +2830,53 @@ def find_best_single_transfer_for_gw(squad_df, all_players_df, bank,
         (all_players_df["status"].isin(["a", "d", ""]))
     ].copy()
 
-    # BB up-weight rationale: in a normal GW only 11 of 15 score, so the
-    # current per-player horizon sum already over-credits non-XI weeks. On a
-    # BB GW all 15 score for certain. Using 2x captures both effects in the
-    # right direction without needing an explicit XI-likelihood model:
-    #  - For nailed starters: BB GW slightly over-counted (acceptable)
-    #  - For bench-likely upgrades: BB GW correctly dominates the gain calc
-    BB_GW_WEIGHT = 2.0
+    def _player_horizon_raw(pid):
+        return sum(xpts_map.get(pid, {}).get(g, 0) for g in horizon_gws)
 
-    def _horizon_value(pid):
-        total = 0.0
-        for g in horizon_gws:
-            xp = xpts_map.get(pid, {}).get(g, 0)
-            total += xp * (BB_GW_WEIGHT if g in bb_gws else 1.0)
-        return total
-
-    # Remaining horizon xPts (what matters for the transfer decision)
+    # Per-player raw horizon xPts (sum across horizon, no discount yet)
     squad_df = squad_df.copy()
-    squad_df["xpts_horizon"] = squad_df["id"].map(_horizon_value)
-    available["xpts_horizon"] = available["id"].map(_horizon_value)
-    
-    # Also get single-GW xPts for display
+    squad_df["xpts_horizon_raw"] = squad_df["id"].map(_player_horizon_raw)
+    available["xpts_horizon_raw"] = available["id"].map(_player_horizon_raw)
+
+    # Single-GW xPts for display
     squad_df["xpts_gw"] = squad_df["id"].map(lambda pid: xpts_map.get(pid, {}).get(gw_id, 0))
     available["xpts_gw"] = available["id"].map(lambda pid: xpts_map.get(pid, {}).get(gw_id, 0))
+
+    # Rank squad players within their position (rank 0 = highest xpts_horizon)
+    squad_df["pos_rank"] = (
+        squad_df.groupby("pos_id")["xpts_horizon_raw"]
+        .rank(method="first", ascending=False)
+        .fillna(0).astype(int) - 1
+    )
 
     squad_df["sell_price"] = squad_df.apply(
         lambda r: calculate_selling_price(r["id"], r["now_cost"], purchase_prices, selling_prices_api),
         axis=1,
     )
 
+    def _discounted_horizon_value(pid, lk):
+        """Sum of xPts across horizon, discounted by XI-likelihood on non-BB GWs."""
+        total = 0.0
+        for g in horizon_gws:
+            xp = xpts_map.get(pid, {}).get(g, 0)
+            weight = 1.0 if g in bb_gws else lk
+            total += xp * weight
+        return total
+
     best = None
     best_gain = -999
 
     for _, out_p in squad_df.iterrows():
+        out_pos = int(out_p["pos_id"])
+        out_lk = _likelihood(out_pos, int(out_p["pos_rank"]))
+        out_value = _discounted_horizon_value(out_p["id"], out_lk)
+
         budget_avail = bank + out_p["sell_price"]
         remaining = squad_df[squad_df["id"] != out_p["id"]]
         tc = remaining["team_id"].value_counts().to_dict()
 
         cands = available[
-            (available["pos_id"] == out_p["pos_id"]) &
+            (available["pos_id"] == out_pos) &
             (available["now_cost"] <= budget_avail)
         ]
         cands = cands[cands["team_id"].map(lambda tid: tc.get(tid, 0) < 3)]
@@ -2856,20 +2884,30 @@ def find_best_single_transfer_for_gw(squad_df, all_players_df, bank,
         if len(cands) == 0:
             continue
 
-        # Pick best by HORIZON xPts, not single GW
-        top = cands.loc[cands["xpts_horizon"].idxmax()]
-        horizon_gain = top["xpts_horizon"] - out_p["xpts_horizon"]
-        gw_gain = top["xpts_gw"] - out_p["xpts_gw"]
-        
-        if horizon_gain > best_gain and horizon_gain > 0.05:
-            best_gain = horizon_gain
-            best = {
-                "out": out_p.to_dict(),
-                "in": top.to_dict(),
-                "xpts_gain": round(horizon_gain, 2),  # horizon gain for decision-making
-                "xpts_gw_gain": round(gw_gain, 2),     # single GW gain for display
-                "new_bank": int(budget_avail - top["now_cost"]),
-            }
+        # Other same-position squad members' horizon xPts (without OUT) — used
+        # to determine where each candidate would rank if they joined the squad
+        other_same_pos_raws = remaining[
+            remaining["pos_id"] == out_pos
+        ]["xpts_horizon_raw"].tolist()
+
+        # Evaluate each candidate individually (their slot rank, hence their
+        # likelihood, depends on their xpts_horizon_raw vs. the others)
+        for _, in_p in cands.iterrows():
+            in_rank = sum(1 for x in other_same_pos_raws if x > in_p["xpts_horizon_raw"])
+            in_lk = _likelihood(out_pos, in_rank)
+            in_value = _discounted_horizon_value(in_p["id"], in_lk)
+
+            horizon_gain = in_value - out_value
+            if horizon_gain > best_gain and horizon_gain > 0.05:
+                gw_gain = in_p["xpts_gw"] - out_p["xpts_gw"]
+                best_gain = horizon_gain
+                best = {
+                    "out": out_p.to_dict(),
+                    "in": in_p.to_dict(),
+                    "xpts_gain": round(horizon_gain, 2),
+                    "xpts_gw_gain": round(gw_gain, 2),
+                    "new_bank": int(budget_avail - in_p["now_cost"]),
+                }
 
     return best
 
