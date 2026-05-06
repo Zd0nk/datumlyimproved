@@ -1811,8 +1811,13 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
                 actual_xgc_per90 = form_xgc * 0.65 + actual_xgc_per90 * 0.35
             if pos in [1, 2] and actual_xgc_per90 > 0:
                 # Use actual xGC as a strong signal for defensive quality
-                # Poisson approximation: P(0 goals) ≈ e^(-xGC)
-                base_cs = math.exp(-actual_xgc_per90 * opp_atk_str)
+                # Poisson approximation: P(0 goals) ≈ e^(-xGC).
+                # Softened opp_atk_str multiplier (** 0.7) — full multiplier
+                # was too punishing for tough fixtures (each unit of opp
+                # attack strength scaled the conceding rate linearly, double-
+                # counting opponent quality alongside the team's xGC which
+                # already reflects opponent mix).
+                base_cs = math.exp(-actual_xgc_per90 * (opp_atk_str ** 0.7))
             else:
                 # Fallback: odds-based estimate, penalised by opponent attack
                 base_cs = 0.30 * (1.0 / max(opp_atk_str, 0.5))
@@ -1820,10 +1825,11 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
                 base_cs *= (1.0 / max(team_def_str, 0.5))
                 base_cs = min(base_cs, 0.50)
 
-            # Blend with odds-derived CS if available
+            # Blend with odds-derived CS if available. Weighting bumped from
+            # 70/30 to 85/15 in favour of bookmaker odds — they're a more
+            # accurate per-fixture signal than the season-average Poisson.
             if cs_prob_from_live is not None:
-                # Live fixture odds CS is the most accurate — weight heavily
-                cs_prob = (base_cs * 0.3 + cs_prob_from_live * 0.7)
+                cs_prob = (base_cs * 0.15 + cs_prob_from_live * 0.85)
             else:
                 team_cs_from_odds = team_odds_season.get("cs_prob")
                 if team_cs_from_odds and actual_xgc_per90 == 0:
@@ -1831,18 +1837,24 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
                 else:
                     cs_prob = base_cs
 
-            # Hard cap — no team keeps a CS more than 50% of the time
-            cs_prob = min(cs_prob, 0.50)
+            # Hard cap lifted from 0.50 to 0.70. Bookmaker-implied CS for
+            # a top defence vs. a poor attack regularly hits 0.55-0.65;
+            # the old 0.50 cap was systematically clipping high-end fixtures.
+            cs_prob = min(cs_prob, 0.70)
 
-            # Apply recent form adjustment: if team has lost 3+ of last 5, reduce CS further
+            # Apply recent form adjustment, softened from previous values.
+            # Old: 0.6 × for 3+ losses, 0.8 × for 2. Backtest showed this
+            # was the largest contributor to CS under-projection (-0.21 bias).
+            # The form penalty was double-counting against bookmaker odds
+            # which already reflect recent form.
             try:
                 team_form_list = p["team_form"] if "team_form" in p.index else []
                 if isinstance(team_form_list, list) and len(team_form_list) >= 3:
                     recent_losses = sum(1 for r in team_form_list[:5] if r == "L")
                     if recent_losses >= 3:
-                        cs_prob *= 0.6  # 40% penalty for bad recent form
+                        cs_prob *= 0.80  # softened from 0.6
                     elif recent_losses >= 2:
-                        cs_prob *= 0.8  # 20% penalty
+                        cs_prob *= 0.92  # softened from 0.80
             except (KeyError, TypeError):
                 pass
 
@@ -2215,7 +2227,7 @@ def solve_best_xi(squad_df, xpts_col="xpts_next_gw"):
 # compute_rotation_risk, etc.). Streamlit's @st.cache_data hashes the decorated
 # function's source only — not its callees — so model updates can otherwise be
 # masked by stale cache. Treating the version as an argument forces invalidation.
-MODEL_VERSION = "2026.05.06.bonus_historical_hybrid"
+MODEL_VERSION = "2026.05.06.cs_recalibration"
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -5784,6 +5796,64 @@ def main():
                         "</span>",
                         unsafe_allow_html=True,
                     )
+
+                    # Top-N Picks Edge — the headline optimizer-success metric.
+                    # The optimizer picks ~15 players from the top of our xPts
+                    # ranking, so what matters most is whether THAT group
+                    # actually outperforms the all-player average. Overall
+                    # correlation/MAE include hundreds of fringe players the
+                    # optimizer never touches; this view focuses on the picks
+                    # that actually matter.
+                    st.markdown("")
+                    st.markdown("### Top-N Picks Edge (the optimizer success metric)")
+                    st.caption(
+                        "For each backtested GW, the model's top-N predicted players' "
+                        "actual avg points vs. the all-player avg. A positive 'Edge' means "
+                        "the model is correctly identifying high-scoring players. "
+                        "A 30-pick edge of 2.0+ pts/pick indicates a strong optimizer."
+                    )
+                    edge_rows = []
+                    for n_top in (15, 30, 50):
+                        gw_edges = []
+                        for gw_id in sorted(comp_df["GW"].unique()):
+                            gw_data = comp_df[comp_df["GW"] == gw_id]
+                            if len(gw_data) < n_top:
+                                continue
+                            top_n = gw_data.nlargest(n_top, "Predicted")
+                            edge = top_n["Actual"].mean() - gw_data["Actual"].mean()
+                            gw_edges.append(edge)
+                        if gw_edges:
+                            edge_rows.append({
+                                "Top-N": n_top,
+                                "Avg Edge (pts/pick)": round(sum(gw_edges) / len(gw_edges), 2),
+                                "Best GW Edge": round(max(gw_edges), 2),
+                                "Worst GW Edge": round(min(gw_edges), 2),
+                                "GWs Positive": f"{sum(1 for e in gw_edges if e > 0)} / {len(gw_edges)}",
+                            })
+                    if edge_rows:
+                        st.dataframe(pd.DataFrame(edge_rows), use_container_width=True)
+                        # Headline interpretation
+                        top30_row = next((r for r in edge_rows if r["Top-N"] == 30), None)
+                        if top30_row:
+                            avg_edge = top30_row["Avg Edge (pts/pick)"]
+                            if avg_edge >= 2.0:
+                                verdict_color = "#34d399"
+                                verdict = "STRONG — model is reliably picking outperformers"
+                            elif avg_edge >= 1.0:
+                                verdict_color = "#fbbf24"
+                                verdict = "DECENT — model has clear edge, room to improve"
+                            elif avg_edge >= 0.5:
+                                verdict_color = "#fb923c"
+                                verdict = "WEAK — picks slightly outperform average, marginal"
+                            else:
+                                verdict_color = "#f87171"
+                                verdict = "POOR — picks barely beat random selection"
+                            st.markdown(
+                                f"<span style='color:{verdict_color};font-weight:600;'>"
+                                f"Top-30 verdict: {verdict} ({avg_edge:+.2f} pts/pick edge)"
+                                f"</span>",
+                                unsafe_allow_html=True,
+                            )
 
                     st.markdown("")
                     st.markdown("### Per-Gameweek Breakdown")
