@@ -1523,6 +1523,39 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
         else:
             availability = fitness * rotation_factor
 
+        # P(starts) and P(appears at all) — the appearance-pts model needs both.
+        # The previous formula only used "availability" (≈ P(starts)) for both
+        # appearance and full-game probability, which under-projected appearance
+        # by ~0.43 pts/fixture in backtest because it ignored the meaningful
+        # chunk of fixtures where a player is subbed on (1 pt). Decomposing
+        # start vs. appear lets us model:
+        #   P(60+ min) = P(start) × P(60+|start)  (subs almost never play 60+)
+        #   P(any min) = P(start) + P(sub on | not start)
+        start_prob = availability  # primary signal for "they're in the XI"
+        if rot and rot.get("appear_rate") is not None:
+            # Floor at start_rate — can't appear less often than you start
+            appear_rate_raw = max(
+                float(rot.get("appear_rate") or 0),
+                float(rot.get("start_rate") or 0),
+            )
+            appear_prob = fitness * appear_rate_raw
+        else:
+            # No rot data — heuristic from season minutes. Slightly higher than
+            # start_prob because most "regular minutes" players also get the
+            # occasional sub appearance.
+            if avg_mins_per_gw >= 60:
+                appear_prob = fitness * 0.97
+            elif avg_mins_per_gw >= 30:
+                appear_prob = fitness * 0.85
+            elif avg_mins_per_gw >= 10:
+                appear_prob = fitness * 0.55
+            elif mins > 0:
+                appear_prob = fitness * 0.25
+            else:
+                appear_prob = 0.0
+        # appear_prob can never be lower than start_prob
+        appear_prob = max(appear_prob, start_prob)
+
         # Expected minutes: E[mins] = E[mins | played] * P(plays). Three branches:
         #   1. rot exists with recent appearances → use per-appearance mins × P(start).
         #   2. rot exists but the player hasn't appeared in the last 7 GWs →
@@ -1557,11 +1590,20 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
         # Convert to "expected 90s" for scaling xG/xA
         expected_90s = expected_mins / 90.0
 
-        # Playing probability (for appearance points — did they get on the pitch?)
-        play_prob = min(availability, 0.98)
+        # Playing probability (any minutes on the pitch — for the 1-pt
+        # appearance reward). Now uses appear_prob (start + sub-on) rather
+        # than just start_prob, recovering the appearance-pts contribution
+        # for players who frequently come on as subs.
+        play_prob = min(appear_prob, 0.98)
 
-        # Full 60+ min probability (for clean sheet, appearance pts)
-        full_game_prob = expected_mins / 90.0 if expected_mins >= 45 else expected_mins / 180.0
+        # Full 60+ min probability — empirically ~88% of starts result in
+        # 60+ mins (most subbed-off minutes land between 60-89), while sub-
+        # only appearances rarely exceed 60 mins (~5%). This decomposition
+        # replaces the old `expected_mins/90 if >=45 else /180` heuristic
+        # which produced a discontinuous cliff at 45 mins and systematically
+        # under-projected appearance/CS pts.
+        sub_only_prob = max(appear_prob - start_prob, 0.0)
+        full_game_prob = min(start_prob * 0.88 + sub_only_prob * 0.05, 0.97)
 
         # ============================================================
         # PER-90 STATS — blend season average with form-weighted recent
