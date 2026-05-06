@@ -1907,23 +1907,24 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
 
                 raw_prob = defcon_per90 / 2.0  # 0-1 scale
 
-                # Linear scaling with calibrated multipliers — backtest showed
-                # the previous sqrt curve over-projected DefCon by ~2x (predicted
-                # 0.60 vs actual 0.29 per fixture across all positions). sqrt is
-                # too generous at moderate raw_probs (0.25 raw -> 0.50 projected),
-                # treating mid-tier earners as if they hit threshold half the
-                # time when reality is closer to 25%. Linear scaling with the
-                # reduced multipliers below brings the per-fixture projection
-                # close to the empirical actual.
+                # Linear scaling with calibrated multipliers. First-pass linear
+                # fix moved bias from +0.31 to +0.24 (predicted 0.53 / actual
+                # 0.29). Second-pass tightening below brings the multipliers
+                # down by ~0.55x to land predicted near 0.29:
+                #   DEF 0.45 -> 0.25  MID 0.22 -> 0.12  FWD 0.10 -> 0.06
+                # The previous sqrt curve (raw_prob ** 0.5) was too generous at
+                # moderate raw_probs (0.25 raw -> 0.50 projected) — the linear
+                # form better matches the empirical "did they hit threshold"
+                # rate observed in backtest data.
                 if pos == 2:  # DEF
-                    # CBs: top earners hit threshold ~50-60% of games
-                    defcon_prob = min(raw_prob * 0.45, 0.60)
+                    # CBs: top earners hit threshold ~30-40% of games on average
+                    defcon_prob = min(raw_prob * 0.25, 0.45)
                 elif pos == 3:  # MID
                     # Only elite CDMs hit 12 CBIRT regularly
-                    defcon_prob = min(raw_prob * 0.22, 0.35)
+                    defcon_prob = min(raw_prob * 0.12, 0.22)
                 else:  # FWD (pos == 4)
                     # Almost no forwards hit 12 CBIRT
-                    defcon_prob = min(raw_prob * 0.10, 0.18)
+                    defcon_prob = min(raw_prob * 0.06, 0.12)
 
                 # Mild fixture adjustment
                 defcon_prob *= (0.9 + 0.1 * opp_atk_str)
