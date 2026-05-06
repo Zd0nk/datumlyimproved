@@ -1846,26 +1846,33 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
             except (KeyError, TypeError):
                 pass
 
-            # Calculate expected FPL points for this fixture
+            # Calculate expected FPL points for this fixture. Each component is
+            # captured as a local variable so the bonus formula can use them
+            # collectively as a BPS-relevant "involvement" signal — replacing
+            # the previous flat PTS_BONUS_AVG * play_prob which had correlation
+            # ~0.10 because it predicted the same bonus for every nailed
+            # starter regardless of attacking/defensive output.
             xpts = 0.0
 
             # Appearance points (2 pts if 60+ mins, 1 pt if <60 mins)
-            xpts += 2.0 * full_game_prob + 1.0 * max(play_prob - full_game_prob, 0)
+            appearance_pts = 2.0 * full_game_prob + 1.0 * max(play_prob - full_game_prob, 0)
+            xpts += appearance_pts
 
             # Goal points (scale by expected 90s played, not just binary)
-            xpts += adj_xg * expected_90s * PTS_GOAL.get(pos, 4)
+            goal_pts = adj_xg * expected_90s * PTS_GOAL.get(pos, 4)
+            xpts += goal_pts
 
             # Assist points
-            xpts += adj_xa * expected_90s * PTS_ASSIST
+            assist_pts = adj_xa * expected_90s * PTS_ASSIST
+            xpts += assist_pts
 
             # Clean sheet points (GK and DEF mainly — need 60+ mins)
-            xpts += cs_prob * PTS_CS.get(pos, 0) * full_game_prob
-
-            # Bonus points estimate (proportional to involvement)
-            xpts += PTS_BONUS_AVG * play_prob
+            cs_pts = cs_prob * PTS_CS.get(pos, 0) * full_game_prob
+            xpts += cs_pts
 
             # Goals conceded penalty for GK/DEF
             # FPL rule: -1 point per 2 goals conceded (i.e. -0.5 per goal) from goal 1
+            conceded_pts = 0.0
             if pos in [1, 2]:
                 if live_fixture:
                     # Use bookmaker-implied expected goals directly
@@ -1877,13 +1884,15 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
                     expected_conceded = league_avg_goals * opp_atk_str
                     if not fix["home"]:
                         expected_conceded *= 1.05  # slight away penalty
-                xpts -= expected_conceded * 0.5 * full_game_prob
+                conceded_pts = -expected_conceded * 0.5 * full_game_prob
+                xpts += conceded_pts
 
             # Save points for GKs: ~1pt per 3 saves
+            save_pts = 0.0
             if pos == 1:
                 expected_saves = 3.0 * opp_atk_str * 0.7
-                save_points = (expected_saves / 3.0)
-                xpts += save_points * full_game_prob
+                save_pts = (expected_saves / 3.0) * full_game_prob
+                xpts += save_pts
 
             # ============================================================
             # DEFENSIVE CONTRIBUTION (DefCon) POINTS
@@ -1933,6 +1942,20 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
                 defcon_xpts = 2.0 * defcon_prob * full_game_prob
                 xpts += defcon_xpts
 
+            # Bonus points: scaled by the player's BPS-relevant expected output
+            # for this fixture (goals + assists + CS + saves + DefCon — these
+            # are the components that drive BPS rankings). Replaces the flat
+            # PTS_BONUS_AVG * play_prob formula whose backtest correlation was
+            # ~0.10 (essentially random for ranking) because it predicted the
+            # same bonus for every nailed starter regardless of expected output.
+            # Calibration: 0.25 multiplier × ~1.0 average signal × 0.95 play_prob
+            # ≈ 0.24 average bonus, matching the empirical 0.22 actual avg.
+            # Cap at 1.5 so big-haul fixtures don't blow past realistic bonus
+            # magnitudes (max possible per game is 3, average for haul games ~2).
+            bonus_signal = goal_pts + assist_pts + cs_pts + save_pts + defcon_xpts
+            bonus_pts = min(bonus_signal * 0.25, 1.5) * play_prob
+            xpts += bonus_pts
+
             # Accumulate xPts — important for DGWs where a player has 2 fixtures
             # in the same GW. Apply a 10% fatigue/rotation penalty to second-and-later
             # fixtures: in practice DGW players are subbed off earlier, sometimes
@@ -1963,12 +1986,12 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
                     "opp_def_str": round(opp_def_str, 3),
                     "team_atk_str": round(team_atk_str, 3),
                     "opp_atk_str": round(opp_atk_str, 3),
-                    "appearance_pts": round(2.0 * full_game_prob + 1.0 * max(play_prob - full_game_prob, 0), 2),
-                    "goal_pts": round(adj_xg * expected_90s * PTS_GOAL.get(pos, 4), 2),
-                    "assist_pts": round(adj_xa * expected_90s * PTS_ASSIST, 2),
-                    "cs_pts": round(cs_prob * PTS_CS.get(pos, 0) * full_game_prob, 2),
-                    "bonus_pts": round(PTS_BONUS_AVG * play_prob, 2),
-                    "conceded_pts": round(-(expected_conceded * 0.5 * full_game_prob), 2) if pos in [1, 2] else 0,
+                    "appearance_pts": round(appearance_pts, 2),
+                    "goal_pts": round(goal_pts, 2),
+                    "assist_pts": round(assist_pts, 2),
+                    "cs_pts": round(cs_pts, 2),
+                    "bonus_pts": round(bonus_pts, 2),
+                    "conceded_pts": round(conceded_pts, 2),
                     "defcon_pts": round(defcon_xpts, 2) if defcon_per90 > 0 and pos in [2, 3, 4] and nineties >= 3 else 0,
                     "total": round(max(xpts, 0), 2),
                 }
@@ -2182,7 +2205,7 @@ def solve_best_xi(squad_df, xpts_col="xpts_next_gw"):
 # compute_rotation_risk, etc.). Streamlit's @st.cache_data hashes the decorated
 # function's source only — not its callees — so model updates can otherwise be
 # masked by stale cache. Treating the version as an argument forces invalidation.
-MODEL_VERSION = "2026.05.06.appearance_defcon_recalibration"
+MODEL_VERSION = "2026.05.06.bonus_output_scaled"
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
