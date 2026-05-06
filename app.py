@@ -5491,6 +5491,13 @@ def main():
         )
         st.caption("Compares Datumly's predicted xPts against actual FPL points for recent gameweeks. "
                     "This tells you how accurate the model is and where it's failing.")
+        # Version stamp so we can verify the deployed code is what's actually
+        # producing the numbers (catches stale cache / deploy lag bugs).
+        st.markdown(
+            f"<span style='color:#5a6580;font-size:0.7rem;font-family:\"Courier New\",monospace;'>"
+            f"Model version: {MODEL_VERSION}</span>",
+            unsafe_allow_html=True,
+        )
 
         # Fetch actual points for recent completed GWs
         events = bootstrap.get("events", [])
