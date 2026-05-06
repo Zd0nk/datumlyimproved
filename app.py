@@ -1943,17 +1943,18 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
                 xpts += defcon_xpts
 
             # Bonus points: scaled by the player's BPS-relevant expected output
-            # for this fixture (goals + assists + CS + saves + DefCon — these
-            # are the components that drive BPS rankings). Replaces the flat
-            # PTS_BONUS_AVG * play_prob formula whose backtest correlation was
-            # ~0.10 (essentially random for ranking) because it predicted the
-            # same bonus for every nailed starter regardless of expected output.
-            # Calibration: 0.25 multiplier × ~1.0 average signal × 0.95 play_prob
-            # ≈ 0.24 average bonus, matching the empirical 0.22 actual avg.
-            # Cap at 1.5 so big-haul fixtures don't blow past realistic bonus
-            # magnitudes (max possible per game is 3, average for haul games ~2).
+            # for this fixture. First-pass linear (signal × 0.25) lifted
+            # correlation from 0.10 to 0.16 but predictions were too compressed
+            # at the extremes (0.07 to 1.43 vs reality 0 to 3+). Power curve
+            # (signal ** 1.3) amplifies the differentiation:
+            #   - Low-output fixtures predict near-zero (correctly)
+            #   - High-output fixtures push toward realistic 2-3 pt hauls
+            # Calibration: 0.18 × signal^1.3 × ~0.95 play_prob ≈ 0.22 average
+            # bonus at avg signal ~1.22, matching the empirical actual.
+            # Cap at 2.5 — close to the FPL max of 3 but allowing for the rare
+            # extreme haul fixture without blowing up.
             bonus_signal = goal_pts + assist_pts + cs_pts + save_pts + defcon_xpts
-            bonus_pts = min(bonus_signal * 0.25, 1.5) * play_prob
+            bonus_pts = min((max(bonus_signal, 0) ** 1.3) * 0.18, 2.5) * play_prob
             xpts += bonus_pts
 
             # Accumulate xPts — important for DGWs where a player has 2 fixtures
@@ -2205,7 +2206,7 @@ def solve_best_xi(squad_df, xpts_col="xpts_next_gw"):
 # compute_rotation_risk, etc.). Streamlit's @st.cache_data hashes the decorated
 # function's source only — not its callees — so model updates can otherwise be
 # masked by stale cache. Treating the version as an argument forces invalidation.
-MODEL_VERSION = "2026.05.06.bonus_output_scaled"
+MODEL_VERSION = "2026.05.06.bonus_power_curve"
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
