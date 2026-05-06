@@ -5660,6 +5660,40 @@ def main():
                                     continue
                                 p = player_info.iloc[0]
 
+                                # Within-GW bonus contamination correction.
+                                # The model's bonus prediction uses the player's
+                                # season-to-date bonus_per_90, which INCLUDES
+                                # the bonus they earned in the GW being
+                                # predicted. For an honest backtest we strip
+                                # that out: pre-GW bonus rate × the model's
+                                # weighting (60% historical × 0.75 regression).
+                                # Other components (xG, form, minutes) have
+                                # similar leakage but require historical
+                                # snapshots to fix — bonus is the only one
+                                # we can correct purely from live-API per-GW
+                                # data we already fetch.
+                                bd = bt_xpts_breakdown.get(pid, {}).get(gw_id, {})
+                                corrected_bonus = bd.get("bonus_pts", 0) if bd else 0
+                                if bd:
+                                    season_bonus = float(p.get("bonus", 0) or 0)
+                                    season_mins = float(p.get("minutes", 0) or 0)
+                                    season_nineties = season_mins / 90.0
+                                    bonus_in_gw = stats.get("bonus", 0) or 0
+                                    pre_gw_nineties = max(season_nineties - mins / 90.0, 0.1)
+                                    pre_gw_bonus = max(season_bonus - bonus_in_gw, 0)
+                                    contaminated_bp90 = season_bonus / max(season_nineties, 1)
+                                    clean_bp90 = pre_gw_bonus / pre_gw_nineties
+                                    delta_bp90 = contaminated_bp90 - clean_bp90
+                                    # Bonus formula: hist_bonus = (bp90 × 0.75 + 0.10) × exp_90s,
+                                    # then × 0.60 weight, × play_prob. Adjust the prediction.
+                                    expected_90s_bd = bd.get("expected_90s", 0) or 0
+                                    play_prob_bd = bd.get("play_prob", 0) or 0
+                                    bonus_adjustment = (
+                                        delta_bp90 * 0.75 * expected_90s_bd * 0.60 * play_prob_bd
+                                    )
+                                    corrected_bonus = max(bd.get("bonus_pts", 0) - bonus_adjustment, 0)
+                                    predicted_pts = predicted_pts - bd.get("bonus_pts", 0) + corrected_bonus
+
                                 error = actual_pts - predicted_pts
                                 abs_error = abs(error)
                                 gw_errors.append(abs_error)
@@ -5682,11 +5716,14 @@ def main():
                                 # component view under-represents DGW prediction
                                 # — until that bug is fixed, treat DGW component
                                 # numbers as a lower bound.
-                                bd = bt_xpts_breakdown.get(pid, {}).get(gw_id)
-                                if bd is None:
+                                if not bd:
                                     continue
                                 pos_id = int(p["pos_id"])
                                 actual_comp = _actual_component_pts(stats, pos_id)
+                                # Use the leakage-corrected bonus from above
+                                # (corrected_bonus is set in the contamination
+                                # correction block, falling back to the raw
+                                # breakdown bonus if no correction was applied).
                                 component_records.append({
                                     "GW": gw_id,
                                     "Pos": p["pos"],
@@ -5698,7 +5735,7 @@ def main():
                                     "assists_actual": actual_comp["assists"],
                                     "cs_pred": bd.get("cs_pts", 0),
                                     "cs_actual": actual_comp["cs"],
-                                    "bonus_pred": bd.get("bonus_pts", 0),
+                                    "bonus_pred": corrected_bonus,
                                     "bonus_actual": actual_comp["bonus"],
                                     "conceded_pred": bd.get("conceded_pts", 0),
                                     "conceded_actual": actual_comp["conceded"],
