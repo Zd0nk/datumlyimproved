@@ -2182,7 +2182,7 @@ def solve_best_xi(squad_df, xpts_col="xpts_next_gw"):
 # compute_rotation_risk, etc.). Streamlit's @st.cache_data hashes the decorated
 # function's source only — not its callees — so model updates can otherwise be
 # masked by stale cache. Treating the version as an argument forces invalidation.
-MODEL_VERSION = "2026.05.03.fitness_rotation_combine"
+MODEL_VERSION = "2026.05.06.appearance_defcon_recalibration"
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
