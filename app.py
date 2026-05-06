@@ -1942,19 +1942,28 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
                 defcon_xpts = 2.0 * defcon_prob * full_game_prob
                 xpts += defcon_xpts
 
-            # Bonus points: scaled by the player's BPS-relevant expected output
-            # for this fixture. First-pass linear (signal × 0.25) lifted
-            # correlation from 0.10 to 0.16 but predictions were too compressed
-            # at the extremes (0.07 to 1.43 vs reality 0 to 3+). Power curve
-            # (signal ** 1.3) amplifies the differentiation:
-            #   - Low-output fixtures predict near-zero (correctly)
-            #   - High-output fixtures push toward realistic 2-3 pt hauls
-            # Calibration: 0.18 × signal^1.3 × ~0.95 play_prob ≈ 0.22 average
-            # bonus at avg signal ~1.22, matching the empirical actual.
-            # Cap at 2.5 — close to the FPL max of 3 but allowing for the rare
-            # extreme haul fixture without blowing up.
-            bonus_signal = goal_pts + assist_pts + cs_pts + save_pts + defcon_xpts
-            bonus_pts = min((max(bonus_signal, 0) ** 1.3) * 0.18, 2.5) * play_prob
+            # Bonus points: hybrid of historical rate + fixture output signal.
+            # Linear and power-curve formulas based purely on output (goals/
+            # assists/CS) plateaued at correlation ~0.16. The bottleneck was
+            # the input signal itself — we predict goals/assists with only
+            # ~0.2 correlation, so a blend can't exceed that.
+            # Historical bonus_per_90 is the strongest single predictor
+            # because BPS allocation depends on stable player-specific
+            # patterns (defensive actions, passing, set-piece involvement)
+            # that we don't model directly. Hybrid:
+            #   60% historical rate (lightly regressed toward league mean)
+            #   40% fixture-adjusted output signal (matches fixture quality)
+            bonus_total = float(p.get("bonus", 0) or 0)
+            bonus_per_90 = bonus_total / max(nineties, 1)
+            # Regress toward 0.40 (rough league avg per 90) for small-sample
+            # / rotated players whose historical rate is noisy
+            hist_rate_per_90 = bonus_per_90 * 0.75 + 0.40 * 0.25
+            hist_bonus = hist_rate_per_90 * expected_90s
+
+            output_signal = goal_pts + assist_pts + cs_pts + save_pts + defcon_xpts
+            output_bonus = (max(output_signal, 0) ** 1.3) * 0.12
+
+            bonus_pts = min(hist_bonus * 0.60 + output_bonus * 0.40, 2.5) * play_prob
             xpts += bonus_pts
 
             # Accumulate xPts — important for DGWs where a player has 2 fixtures
@@ -2206,7 +2215,7 @@ def solve_best_xi(squad_df, xpts_col="xpts_next_gw"):
 # compute_rotation_risk, etc.). Streamlit's @st.cache_data hashes the decorated
 # function's source only — not its callees — so model updates can otherwise be
 # masked by stale cache. Treating the version as an argument forces invalidation.
-MODEL_VERSION = "2026.05.06.bonus_power_curve"
+MODEL_VERSION = "2026.05.06.bonus_historical_hybrid"
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
