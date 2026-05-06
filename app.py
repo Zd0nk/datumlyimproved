@@ -1907,16 +1907,23 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
 
                 raw_prob = defcon_per90 / 2.0  # 0-1 scale
 
+                # Linear scaling with calibrated multipliers — backtest showed
+                # the previous sqrt curve over-projected DefCon by ~2x (predicted
+                # 0.60 vs actual 0.29 per fixture across all positions). sqrt is
+                # too generous at moderate raw_probs (0.25 raw -> 0.50 projected),
+                # treating mid-tier earners as if they hit threshold half the
+                # time when reality is closer to 25%. Linear scaling with the
+                # reduced multipliers below brings the per-fixture projection
+                # close to the empirical actual.
                 if pos == 2:  # DEF
-                    # Conservative but fair — CBs are the primary DefCon earners
-                    defcon_prob = min((raw_prob ** 0.5) * 0.6, 0.70)
+                    # CBs: top earners hit threshold ~50-60% of games
+                    defcon_prob = min(raw_prob * 0.45, 0.60)
                 elif pos == 3:  # MID
-                    # Much more conservative — only elite CDMs earn DC regularly
-                    # Most MIDs (attackers, wingers, AMs) almost never hit 12 CBIRT
-                    defcon_prob = min((raw_prob ** 0.5) * 0.35, 0.40)
+                    # Only elite CDMs hit 12 CBIRT regularly
+                    defcon_prob = min(raw_prob * 0.22, 0.35)
                 else:  # FWD (pos == 4)
-                    # Extremely rare — almost no forwards hit 12 CBIRT
-                    defcon_prob = min((raw_prob ** 0.5) * 0.15, 0.20)
+                    # Almost no forwards hit 12 CBIRT
+                    defcon_prob = min(raw_prob * 0.10, 0.18)
 
                 # Mild fixture adjustment
                 defcon_prob *= (0.9 + 0.1 * opp_atk_str)
