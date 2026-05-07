@@ -3008,7 +3008,15 @@ def find_best_single_transfer_for_gw(squad_df, all_players_df, bank,
 def solve_free_hit_squad(all_players_df, xpts_map, gw_id, budget=1000, locked_ids=None,
                          max_per_team=3):
     """Free Hit / Loan Rangers: pick best possible 15-man squad for a single GW.
-    
+
+    XI-aware: previously the objective summed all 15 players' xPts equally,
+    but Free Hit only scores the XI + captain. The old formulation wasted
+    budget on bench players who'd never score under the chip — exactly the
+    opposite of what FH should do (concentrate spend on the XI). The new
+    formulation introduces explicit XI variables (top 11 with valid formation)
+    plus a captain variable (×1 extra bonus to the chosen captain). Audit
+    finding #11.
+
     max_per_team: 3 for normal Free Hit, None/999 for Loan Rangers (no team limit).
     """
     if locked_ids is None:
@@ -3041,35 +3049,83 @@ def solve_free_hit_squad(all_players_df, xpts_map, gw_id, budget=1000, locked_id
     pids = eligible["id"].tolist()
 
     prob = LpProblem(f"FH_GW{gw_id}", LpMaximize)
-    x = {pid: LpVariable(f"fh_{gw_id}_{pid}", cat="Binary") for pid in pids}
-    prob += lpSum(x[pid] * xv[pid_map[pid]] for pid in pids)
-    prob += lpSum(x[pid] * cv[pid_map[pid]] for pid in pids) <= budget
-    prob += lpSum(x[pid] for pid in pids) == 15
+    s = {pid: LpVariable(f"fh_s_{gw_id}_{pid}", cat="Binary") for pid in pids}      # in 15-man squad
+    xi = {pid: LpVariable(f"fh_xi_{gw_id}_{pid}", cat="Binary") for pid in pids}    # in starting XI
+    cap = {pid: LpVariable(f"fh_c_{gw_id}_{pid}", cat="Binary") for pid in pids}    # is captain
+
+    # Bench players score nothing under FH but still need to be in the squad.
+    # Tiny non-zero weight on s avoids the solver picking arbitrary 0-xPts
+    # filler bench players (it'll prefer cheaper ones, freeing budget for XI).
+    BENCH_WEIGHT = 0.001
+    prob += (
+        lpSum(xi[pid] * xv[pid_map[pid]] for pid in pids)
+        + lpSum(cap[pid] * xv[pid_map[pid]] for pid in pids)  # captain ×1 extra
+        + lpSum(s[pid] * xv[pid_map[pid]] * BENCH_WEIGHT for pid in pids)
+    )
+
+    # Squad: 15 players, budget, position counts, team caps
+    prob += lpSum(s[pid] for pid in pids) == 15
+    prob += lpSum(s[pid] * cv[pid_map[pid]] for pid in pids) <= budget
     for pos_id, cnt in [(1, 2), (2, 5), (3, 5), (4, 3)]:
-        prob += lpSum(x[pid] for pid in pids if pv[pid_map[pid]] == pos_id) == cnt
+        prob += lpSum(s[pid] for pid in pids if pv[pid_map[pid]] == pos_id) == cnt
     for tid in set(tv):
-        prob += lpSum(x[pid] for pid in pids if tv[pid_map[pid]] == tid) <= max_per_team
+        prob += lpSum(s[pid] for pid in pids if tv[pid_map[pid]] == tid) <= max_per_team
+
+    # XI: 11 players, subset of squad, valid formation, no blankers
+    prob += lpSum(xi[pid] for pid in pids) == 11
+    for pid in pids:
+        prob += xi[pid] <= s[pid]
+        if xv[pid_map[pid]] == 0:
+            prob += xi[pid] == 0  # don't start a blanking player
+    prob += lpSum(xi[pid] for pid in pids if pv[pid_map[pid]] == 1) == 1   # 1 GK
+    prob += lpSum(xi[pid] for pid in pids if pv[pid_map[pid]] == 2) >= 3
+    prob += lpSum(xi[pid] for pid in pids if pv[pid_map[pid]] == 2) <= 5
+    prob += lpSum(xi[pid] for pid in pids if pv[pid_map[pid]] == 3) >= 2
+    prob += lpSum(xi[pid] for pid in pids if pv[pid_map[pid]] == 3) <= 5
+    prob += lpSum(xi[pid] for pid in pids if pv[pid_map[pid]] == 4) >= 1
+    prob += lpSum(xi[pid] for pid in pids if pv[pid_map[pid]] == 4) <= 3
+
+    # Captain: exactly 1, must be in XI
+    prob += lpSum(cap[pid] for pid in pids) == 1
+    for pid in pids:
+        prob += cap[pid] <= xi[pid]
+
+    # Locked players forced in
     for pid in pids:
         if pid in locked_ids:
-            prob += x[pid] == 1
+            prob += s[pid] == 1
+
     try:
         prob.solve(PULP_CBC_CMD(msg=0, timeLimit=30))
     except Exception:
         return None
     if LpStatus[prob.status] != "Optimal":
         return None
-    sel = [pid for pid in pids if value(x[pid]) is not None and value(x[pid]) > 0.5]
-    return eligible[eligible["id"].isin(sel)].copy()
+    sel = [pid for pid in pids if value(s[pid]) is not None and value(s[pid]) > 0.5]
+    result = eligible[eligible["id"].isin(sel)].copy()
+    # Tag XI status so the UI can render starters vs bench correctly
+    xi_ids = {pid for pid in pids if value(xi[pid]) is not None and value(xi[pid]) > 0.5}
+    result["is_xi"] = result["id"].isin(xi_ids)
+    return result
 
 
 def solve_wildcard_squad(all_players_df, xpts_map, planning_gw, n_future, budget=1000,
-                         team_fixture_counts=None, locked_ids=None):
+                         team_fixture_counts=None, locked_ids=None, bb_gws=None):
     """
     Wildcard: best 15-man squad optimised for total xPts over remaining GWs,
     with per-GW XI awareness and locked player support.
+
+    bb_gws: set of GW ids in the planning horizon where Bench Boost is
+        scheduled. For these GWs, the bench's xPts is given full weight
+        (since all 15 players score under BB) — biases the squad toward
+        stronger bench composition when BB is queued. Without this, the
+        wildcard solver builds a thin-bench squad that wastes BB potential.
+        Audit finding #12 (squad-construction side).
     """
     if locked_ids is None:
         locked_ids = set()
+    if bb_gws is None:
+        bb_gws = set()
     gw_range = list(range(planning_gw, planning_gw + n_future))
 
     eligible = all_players_df[
@@ -3144,13 +3200,18 @@ def solve_wildcard_squad(all_players_df, xpts_map, planning_gw, n_future, budget
         for gw in gw_range:
             player_gw_xpts[pid][gw] = xpts_map.get(pid, {}).get(gw, 0)
 
-    # Objective: sum over all GWs of (XI players at full value + bench at discount)
+    # Objective: sum over all GWs of (XI players at full value + bench at
+    # discount). On a Bench Boost GW the discount becomes 1.0 — all 15
+    # players score, so bench upgrades earn full credit toward the squad
+    # objective. This biases the wildcard pick toward a stronger bench
+    # when BB is queued.
     obj_terms = []
     for gw in gw_range:
+        bench_weight_for_gw = 1.0 if gw in bb_gws else BENCH_WEIGHT
         for pid in pids:
             gw_xpts = player_gw_xpts[pid][gw]
-            obj_terms.append(xi_gw[gw][pid] * gw_xpts * (1.0 - BENCH_WEIGHT))
-            obj_terms.append(x[pid] * gw_xpts * BENCH_WEIGHT)
+            obj_terms.append(xi_gw[gw][pid] * gw_xpts * (1.0 - bench_weight_for_gw))
+            obj_terms.append(x[pid] * gw_xpts * bench_weight_for_gw)
     prob += lpSum(obj_terms)
 
     # Budget
@@ -3489,9 +3550,17 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
         if chip == "wildcard":
             total_val = int(current_bank + current_squad["now_cost"].sum())
             wc_pool = all_players_df[~all_players_df["id"].isin(banned_ids)] if banned_ids else all_players_df
+            # Pass any BB GWs from the chip schedule that fall within the
+            # remaining horizon — this biases the wildcard squad construction
+            # toward a stronger bench when BB is queued (audit finding #12).
+            wc_horizon_end = gw + (n_gws - i)
+            wc_bb_gws = {
+                g for g, c in chip_schedule.items()
+                if c == "bench_boost" and gw <= g < wc_horizon_end
+            }
             wc_squad = solve_wildcard_squad(wc_pool, xpts_map, gw, n_gws - i, total_val,
                                                team_fixture_counts=team_fixture_counts,
-                                               locked_ids=locked_ids)
+                                               locked_ids=locked_ids, bb_gws=wc_bb_gws)
             if wc_squad is not None:
                 current_squad = wc_squad
                 gw_entry["squad"] = wc_squad
