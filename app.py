@@ -3219,26 +3219,81 @@ def solve_wildcard_squad(all_players_df, xpts_map, planning_gw, n_future, budget
     return eligible[eligible["id"].isin(sel)].copy()
 
 
-def find_best_captain(squad_df, xpts_map, gw_id):
-    """Find best captain (highest xPts) for a specific GW."""
-    if squad_df is None or len(squad_df) == 0:
-        return None
+def _captain_score(squad_df, xpts_map, gw_id):
+    """Build the captain-selection score column. Used by both find_best_captain
+    and find_best_vice_captain so the risk-weighting logic stays in one place.
+
+    The captain doubles points, so a blanking captain is doubly costly. Pure
+    idxmax(xpts_gw) ignores that two players with similar EV can have very
+    different downside profiles:
+      - Nailed 6.5 xPts (low variance, ~certain to play 90)
+      - Rotation 7.0 xPts (higher EV but ~30% chance of blanking)
+
+    Although xpts_gw already incorporates play_prob multiplicatively into
+    each component, the captain decision is risk-asymmetric: the doubled
+    upside of an in-form rotation player rarely justifies the doubled
+    downside of them being benched. We add a captaincy risk premium that
+    discounts the variance contribution from rotation:
+
+        captain_score = xpts_gw × (0.5 + 0.5 × start_prob)
+
+    start_prob 1.0 → factor 1.0  (no penalty for nailed starters)
+    start_prob 0.7 → factor 0.85 (15% penalty for moderate rotation)
+    start_prob 0.4 → factor 0.70 (30% penalty for heavy rotation)
+
+    Also hard-excludes players with chance_playing < 75% — they shouldn't
+    captain regardless of xpts because the FPL injury flag explicitly
+    signals reduced fitness.
+
+    Returns (squad_df_filtered, score_series).
+    """
     sq = squad_df.copy()
     sq["xpts_gw"] = sq["id"].map(lambda pid: xpts_map.get(pid, {}).get(gw_id, 0))
-    return sq.loc[sq["xpts_gw"].idxmax()]
+
+    if "chance_playing" in sq.columns:
+        chance = pd.to_numeric(sq["chance_playing"], errors="coerce").fillna(100)
+        sq = sq[chance >= 75].copy()
+    if len(sq) == 0:
+        return sq, None
+
+    if "start_prob" in sq.columns:
+        risk_factor = 0.5 + 0.5 * sq["start_prob"].fillna(0.85).clip(0, 1)
+    else:
+        risk_factor = 1.0
+    sq["captain_score"] = sq["xpts_gw"] * risk_factor
+    return sq, sq["captain_score"]
+
+
+def find_best_captain(squad_df, xpts_map, gw_id):
+    """Find best captain — highest risk-weighted xPts for the GW.
+    See _captain_score for the scoring rationale."""
+    if squad_df is None or len(squad_df) == 0:
+        return None
+    sq, score = _captain_score(squad_df, xpts_map, gw_id)
+    if score is None or sq["xpts_gw"].max() <= 0:
+        return None
+    return sq.loc[score.idxmax()]
 
 
 def find_best_vice_captain(squad_df, xpts_map, gw_id, captain_id=None):
-    """Find best vice captain (2nd highest xPts) for Dynamic Duo chip."""
+    """Find best vice captain — same risk-weighted logic as captain, but
+    excluding the chosen captain. Used both for normal vice fallback (FPL
+    auto-promotes vice if captain plays 0 mins) and for the Dynamic Duo
+    chip (vice gets ×1 extra)."""
     if squad_df is None or len(squad_df) == 0:
         return None
-    sq = squad_df.copy()
-    sq["xpts_gw"] = sq["id"].map(lambda pid: xpts_map.get(pid, {}).get(gw_id, 0))
-    if captain_id is not None:
-        sq = sq[sq["id"] != captain_id]
-    if len(sq) == 0:
+    sq, score = _captain_score(squad_df, xpts_map, gw_id)
+    if score is None:
         return None
-    return sq.loc[sq["xpts_gw"].idxmax()]
+    if captain_id is not None:
+        mask = sq["id"] != captain_id
+        sq = sq[mask].copy()
+        if len(sq) == 0:
+            return None
+        score = sq["captain_score"]
+    if sq["xpts_gw"].max() <= 0:
+        return None
+    return sq.loc[score.idxmax()]
 
 
 def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
