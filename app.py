@@ -5767,6 +5767,7 @@ def main():
 
                                 all_comparisons.append({
                                     "GW": gw_id,
+                                    "pid": pid,
                                     "Player": p["name"],
                                     "Team": p["team"],
                                     "Pos": p["pos"],
@@ -5909,6 +5910,137 @@ def main():
                                 f"</span>",
                                 unsafe_allow_html=True,
                             )
+
+                    # Squad-Level Backtest — the gold-standard validation.
+                    # Run the actual optimizer (solve_optimal_squad + XI + captain)
+                    # against each backtested GW's data, sum the actual points,
+                    # and compare to baselines. Bypasses all proxy metrics:
+                    # this directly answers "would using the optimizer have
+                    # scored more points than not using it?"
+                    st.markdown("")
+                    st.markdown("### Squad-Level Backtest (gold-standard validation)")
+                    st.caption(
+                        "Runs the actual optimizer against each backtested GW. "
+                        "Compares the optimizer's XI + captain score to (a) random "
+                        "selection and (b) hindsight-perfect XI (top 11 actual "
+                        "scorers — the upper bound). 'Edge over Random' is what "
+                        "you'd gain vs. picking blind. '% of Hindsight' is how "
+                        "close to the perfect-information ceiling we get."
+                    )
+
+                    # Build actual_pts lookup keyed by (gw, pid)
+                    actual_pts_lookup = {}
+                    for _row in all_comparisons:
+                        actual_pts_lookup.setdefault(_row["GW"], {})[_row["pid"]] = _row["Actual"]
+
+                    with st.spinner("Solving optimal squad against backtest data..."):
+                        # Inject backtest predictions into a copy of df so
+                        # solve_optimal_squad uses the model's view from
+                        # min_bt_gw (the same anchor as the rest of the backtest)
+                        df_bt = df.copy()
+                        df_bt["xpts_total_bt"] = df_bt["id"].map(
+                            lambda pid: sum(
+                                bt_xpts_map.get(pid, {}).get(g, 0)
+                                for g in backtest_gw_ids
+                            )
+                        )
+                        opt_squad, opt_err = solve_optimal_squad(
+                            df_bt, xpts_col="xpts_total_bt", budget=1000
+                        )
+
+                    if opt_squad is None:
+                        st.warning(f"Could not solve optimal squad for backtest: {opt_err}")
+                    else:
+                        squad_results = []
+                        for gw_id in sorted(backtest_gw_ids):
+                            xi, _ = solve_best_xi_for_gw(opt_squad, bt_xpts_map, gw_id)
+                            if xi is None or len(xi) == 0:
+                                continue
+                            gw_actuals = actual_pts_lookup.get(gw_id, {})
+                            xi_actual = sum(gw_actuals.get(pid, 0) for pid in xi["id"].tolist())
+                            captain_row = find_best_captain(xi, bt_xpts_map, gw_id)
+                            cap_pid = (
+                                captain_row.get("id") if isinstance(captain_row, dict)
+                                else (captain_row["id"] if captain_row is not None else None)
+                            )
+                            cap_bonus = gw_actuals.get(cap_pid, 0) if cap_pid is not None else 0
+                            optimizer_total = xi_actual + cap_bonus
+
+                            gw_data = comp_df[comp_df["GW"] == gw_id]
+                            if len(gw_data) < 11:
+                                continue
+                            avg_per_player = gw_data["Actual"].mean()
+                            random_xi = avg_per_player * 11
+                            hindsight_xi = gw_data.nlargest(11, "Actual")["Actual"].sum()
+
+                            squad_results.append({
+                                "GW": gw_id,
+                                "Optimizer XI": round(xi_actual, 1),
+                                "+ Captain": round(cap_bonus, 1),
+                                "Total": round(optimizer_total, 1),
+                                "Random XI": round(random_xi, 1),
+                                "Hindsight XI": round(hindsight_xi, 1),
+                                "Edge over Random": round(optimizer_total - random_xi, 1),
+                                "% of Hindsight": (
+                                    f"{optimizer_total / hindsight_xi:.0%}"
+                                    if hindsight_xi > 0 else "n/a"
+                                ),
+                            })
+
+                        if squad_results:
+                            squad_results_df = pd.DataFrame(squad_results)
+                            st.dataframe(squad_results_df, use_container_width=True)
+
+                            # Aggregate verdict
+                            avg_edge = sum(r["Edge over Random"] for r in squad_results) / len(squad_results)
+                            avg_optimizer = sum(r["Total"] for r in squad_results) / len(squad_results)
+                            avg_hindsight = sum(r["Hindsight XI"] for r in squad_results) / len(squad_results)
+                            ceiling_pct = avg_optimizer / avg_hindsight if avg_hindsight > 0 else 0
+
+                            # Edge interpretation: a typical FPL XI scores ~50 pts;
+                            # a strong manager averages ~60-65, ~10-15 above random.
+                            # Translates to optimizer edge thresholds:
+                            if avg_edge >= 12:
+                                squad_color = "#34d399"
+                                squad_verdict = "ELITE — squad picks rival top managers"
+                            elif avg_edge >= 8:
+                                squad_color = "#34d399"
+                                squad_verdict = "STRONG — squad consistently outperforms"
+                            elif avg_edge >= 5:
+                                squad_color = "#fbbf24"
+                                squad_verdict = "DECENT — squad adds clear value"
+                            elif avg_edge >= 2:
+                                squad_color = "#fb923c"
+                                squad_verdict = "WEAK — minor edge over guessing"
+                            else:
+                                squad_color = "#f87171"
+                                squad_verdict = "POOR — barely beats random"
+
+                            st.markdown(
+                                f"<div style='background:#1a1e2e;border-radius:8px;"
+                                f"padding:0.8rem;margin-top:0.5rem;'>"
+                                f"<span style='color:{squad_color};font-weight:700;font-size:1rem;'>"
+                                f"Squad verdict: {squad_verdict}</span><br>"
+                                f"<span style='color:#8892a8;font-size:0.85rem;'>"
+                                f"Avg edge: {avg_edge:+.1f} pts/GW · "
+                                f"Avg score: {avg_optimizer:.1f} pts · "
+                                f"% of perfect ceiling: {ceiling_pct:.0%}"
+                                f"</span></div>",
+                                unsafe_allow_html=True,
+                            )
+
+                            # Show the picked squad once for transparency
+                            with st.expander("View the optimal squad picked for this backtest"):
+                                squad_show = opt_squad[
+                                    ["name", "team", "pos", "price", "xpts_total_bt"]
+                                ].copy()
+                                squad_show.columns = ["Player", "Team", "Pos", "Price", "Predicted xPts (horizon)"]
+                                squad_show = squad_show.sort_values(["Pos", "Predicted xPts (horizon)"], ascending=[True, False])
+                                squad_show = squad_show.reset_index(drop=True)
+                                squad_show.index += 1
+                                st.dataframe(squad_show, use_container_width=True)
+                        else:
+                            st.warning("Could not score any backtest GWs at the squad level.")
 
                     st.markdown("")
                     st.markdown("### Per-Gameweek Breakdown")
