@@ -5693,6 +5693,13 @@ def main():
                 # per-component MAE / correlation table.
                 component_records = []
 
+                # Full per-(GW, pid) lookup including 0-min players. Used for
+                # autosub simulation in the squad backtest — we need to know
+                # who actually didn't play (mins == 0) so the correct bench
+                # player can be auto-promoted, mirroring FPL's real behaviour.
+                # The main comparison loop above filters out 0-min players.
+                squad_actuals_full = {}
+
                 with st.spinner("Fetching actual points data..."):
                     for gw_event in completed_gws:
                         gw_id = gw_event["id"]
@@ -5707,6 +5714,19 @@ def main():
                             elements = live_data.get("elements", [])
 
                             gw_errors = []
+                            # Pre-pass: capture FULL actuals (including 0-min
+                            # players) for autosub support in the squad backtest.
+                            # Done before the filtered comparison loop so we
+                            # never lose 0-min entries.
+                            squad_actuals_full[gw_id] = {}
+                            for el in elements:
+                                _pid = el["id"]
+                                _stats = el.get("stats", {})
+                                squad_actuals_full[gw_id][_pid] = {
+                                    "pts": _stats.get("total_points", 0) or 0,
+                                    "mins": _stats.get("minutes", 0) or 0,
+                                }
+
                             for el in elements:
                                 pid = el["id"]
                                 stats = el.get("stats", {})
@@ -5951,19 +5971,131 @@ def main():
                     if opt_squad is None:
                         st.warning(f"Could not solve optimal squad for backtest: {opt_err}")
                     else:
+                        # Autosub helper: simulates FPL's auto-substitution rule.
+                        # If a starter plays 0 mins, the highest-priority bench
+                        # player who can fill the slot (without breaking formation)
+                        # is auto-promoted. Bench priority: GK first (only fills
+                        # GK slots), then outfield in xPts-descending order
+                        # (matches the bench order we display).
+                        def _apply_autosubs(xi_df, bench_df, gw_actuals_full):
+                            """Returns final XI ids after autosubs.
+                            Mutates nothing; returns a new id-list + autosub log."""
+                            xi_pids = xi_df["id"].tolist()
+                            xi_pos = dict(zip(xi_df["id"], xi_df["pos_id"]))
+                            # Identify blanking starters
+                            blankers = [
+                                pid for pid in xi_pids
+                                if gw_actuals_full.get(pid, {"mins": 0})["mins"] == 0
+                            ]
+                            if not blankers:
+                                return xi_pids, []
+
+                            # Sort bench: GK first, then outfield by xPts desc
+                            bench = bench_df.copy()
+                            bench["xpts_gw"] = bench["id"].map(
+                                lambda pid: bt_xpts_map.get(pid, {}).get(gw_id, 0)
+                            )
+                            bench["_gk_first"] = (bench["pos_id"] != 1).astype(int)
+                            bench = bench.sort_values(
+                                ["_gk_first", "xpts_gw"], ascending=[True, False]
+                            )
+
+                            # Available bench players who actually played
+                            avail = [
+                                (row["id"], int(row["pos_id"]))
+                                for _, row in bench.iterrows()
+                                if gw_actuals_full.get(row["id"], {"mins": 0})["mins"] > 0
+                            ]
+
+                            # Current formation counts (excluding blankers)
+                            non_blank_xi = [pid for pid in xi_pids if pid not in blankers]
+                            pos_counts = {1: 0, 2: 0, 3: 0, 4: 0}
+                            for pid in non_blank_xi:
+                                pos_counts[xi_pos[pid]] += 1
+
+                            # Formation constraints: 1 GK, 3-5 DEF, 2-5 MID, 1-3 FWD
+                            min_pos = {1: 1, 2: 3, 3: 2, 4: 1}
+                            max_pos = {1: 1, 2: 5, 3: 5, 4: 3}
+
+                            sub_log = []
+                            final_xi = list(non_blank_xi)
+                            avail_remaining = list(avail)
+
+                            for blank_pid in blankers:
+                                blank_pos = xi_pos[blank_pid]
+                                replacement = None
+                                # Try same-position first (always valid)
+                                for i, (sub_pid, sub_pos) in enumerate(avail_remaining):
+                                    if sub_pos == blank_pos:
+                                        replacement = (sub_pid, sub_pos)
+                                        avail_remaining.pop(i)
+                                        break
+                                # Otherwise try a position swap that keeps formation valid
+                                if replacement is None and blank_pos != 1:
+                                    for i, (sub_pid, sub_pos) in enumerate(avail_remaining):
+                                        if sub_pos == 1:
+                                            continue  # GK can't fill outfield
+                                        new_counts = dict(pos_counts)
+                                        new_counts[sub_pos] += 1
+                                        if (
+                                            new_counts[sub_pos] <= max_pos[sub_pos]
+                                            and pos_counts[blank_pos] >= min_pos[blank_pos] - 1
+                                            and all(
+                                                new_counts[p] >= min_pos[p]
+                                                for p in [1, 2, 3, 4]
+                                                if p != blank_pos
+                                            )
+                                        ):
+                                            replacement = (sub_pid, sub_pos)
+                                            avail_remaining.pop(i)
+                                            break
+
+                                if replacement is not None:
+                                    final_xi.append(replacement[0])
+                                    pos_counts[replacement[1]] += 1
+                                    sub_log.append((blank_pid, replacement[0]))
+                                else:
+                                    # No valid replacement — starter stays in (scores 0)
+                                    final_xi.append(blank_pid)
+                                    pos_counts[blank_pos] += 1
+
+                            return final_xi, sub_log
+
                         squad_results = []
+                        total_autosubs = 0
                         for gw_id in sorted(backtest_gw_ids):
-                            xi, _ = solve_best_xi_for_gw(opt_squad, bt_xpts_map, gw_id)
+                            xi, bench = solve_best_xi_for_gw(opt_squad, bt_xpts_map, gw_id)
                             if xi is None or len(xi) == 0:
                                 continue
-                            gw_actuals = actual_pts_lookup.get(gw_id, {})
-                            xi_actual = sum(gw_actuals.get(pid, 0) for pid in xi["id"].tolist())
+                            gw_full = squad_actuals_full.get(gw_id, {})
+                            gw_actuals_simple = {
+                                pid: data["pts"] for pid, data in gw_full.items()
+                            }
+
+                            # Apply autosubs — promote bench when a starter blanks
+                            final_xi_pids, sub_log = _apply_autosubs(xi, bench, gw_full)
+                            total_autosubs += len(sub_log)
+                            xi_actual = sum(gw_actuals_simple.get(pid, 0) for pid in final_xi_pids)
+
+                            # Captain — picked from original XI (FPL captain
+                            # bonus only doubles if they actually play). If
+                            # captain blanks, vice gets the bonus.
                             captain_row = find_best_captain(xi, bt_xpts_map, gw_id)
                             cap_pid = (
                                 captain_row.get("id") if isinstance(captain_row, dict)
                                 else (captain_row["id"] if captain_row is not None else None)
                             )
-                            cap_bonus = gw_actuals.get(cap_pid, 0) if cap_pid is not None else 0
+                            cap_mins = gw_full.get(cap_pid, {"mins": 0})["mins"] if cap_pid else 0
+                            if cap_pid and cap_mins > 0:
+                                cap_bonus = gw_actuals_simple.get(cap_pid, 0)
+                            else:
+                                # Captain blanked — promote vice
+                                vice_row = find_best_vice_captain(xi, bt_xpts_map, gw_id, captain_id=cap_pid)
+                                vice_pid = (
+                                    vice_row.get("id") if isinstance(vice_row, dict)
+                                    else (vice_row["id"] if vice_row is not None else None)
+                                )
+                                cap_bonus = gw_actuals_simple.get(vice_pid, 0) if vice_pid else 0
                             optimizer_total = xi_actual + cap_bonus
 
                             gw_data = comp_df[comp_df["GW"] == gw_id]
@@ -5978,6 +6110,7 @@ def main():
                                 "Optimizer XI": round(xi_actual, 1),
                                 "+ Captain": round(cap_bonus, 1),
                                 "Total": round(optimizer_total, 1),
+                                "Autosubs": len(sub_log),
                                 "Random XI": round(random_xi, 1),
                                 "Hindsight XI": round(hindsight_xi, 1),
                                 "Edge over Random": round(optimizer_total - random_xi, 1),
