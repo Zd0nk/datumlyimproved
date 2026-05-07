@@ -1955,27 +1955,25 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
                 xpts += defcon_xpts
 
             # Bonus points: hybrid of historical rate + fixture output signal.
-            # Linear and power-curve formulas based purely on output (goals/
-            # assists/CS) plateaued at correlation ~0.16. The bottleneck was
-            # the input signal itself — we predict goals/assists with only
-            # ~0.2 correlation, so a blend can't exceed that.
-            # Historical bonus_per_90 is the strongest single predictor
-            # because BPS allocation depends on stable player-specific
-            # patterns (defensive actions, passing, set-piece involvement)
-            # that we don't model directly. Hybrid:
-            #   60% historical rate (lightly regressed toward league mean)
-            #   40% fixture-adjusted output signal (matches fixture quality)
+            # First-version hybrid (60/40 hist/output, regress 25%) calibrated
+            # too low — predicted avg 0.10 vs actual 0.22. The heavy regression
+            # toward 0.40 was dragging predictions down (most players have
+            # bonus_per_90 in 0.05-0.30 range, so regression mostly pulls high
+            # values up modestly while pulling low values up not enough to
+            # cover the haul-game tail). Recalibrated:
+            #   - Less regression: × 0.90 + 0.45 × 0.10 (was × 0.75 + × 0.25)
+            #   - Higher historical weight: 0.70 (was 0.60)
+            #   - Output multiplier 0.18 (was 0.12) for stronger fixture signal
+            # Target: avg pred ~0.20-0.22, matching empirical actual.
             bonus_total = float(p.get("bonus", 0) or 0)
             bonus_per_90 = bonus_total / max(nineties, 1)
-            # Regress toward 0.40 (rough league avg per 90) for small-sample
-            # / rotated players whose historical rate is noisy
-            hist_rate_per_90 = bonus_per_90 * 0.75 + 0.40 * 0.25
+            hist_rate_per_90 = bonus_per_90 * 0.90 + 0.45 * 0.10
             hist_bonus = hist_rate_per_90 * expected_90s
 
             output_signal = goal_pts + assist_pts + cs_pts + save_pts + defcon_xpts
-            output_bonus = (max(output_signal, 0) ** 1.3) * 0.12
+            output_bonus = (max(output_signal, 0) ** 1.3) * 0.18
 
-            bonus_pts = min(hist_bonus * 0.60 + output_bonus * 0.40, 2.5) * play_prob
+            bonus_pts = min(hist_bonus * 0.70 + output_bonus * 0.30, 2.5) * play_prob
             xpts += bonus_pts
 
             # Accumulate xPts — important for DGWs where a player has 2 fixtures
@@ -2227,7 +2225,7 @@ def solve_best_xi(squad_df, xpts_col="xpts_next_gw"):
 # compute_rotation_risk, etc.). Streamlit's @st.cache_data hashes the decorated
 # function's source only — not its callees — so model updates can otherwise be
 # masked by stale cache. Treating the version as an argument forces invalidation.
-MODEL_VERSION = "2026.05.06.cs_recalibration"
+MODEL_VERSION = "2026.05.07.bonus_recalibration"
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -5696,12 +5694,14 @@ def main():
                                     contaminated_bp90 = season_bonus / max(season_nineties, 1)
                                     clean_bp90 = pre_gw_bonus / pre_gw_nineties
                                     delta_bp90 = contaminated_bp90 - clean_bp90
-                                    # Bonus formula: hist_bonus = (bp90 × 0.75 + 0.10) × exp_90s,
-                                    # then × 0.60 weight, × play_prob. Adjust the prediction.
+                                    # Bonus formula: hist_bonus = (bp90 × 0.90 + 0.045) × exp_90s,
+                                    # then × 0.70 weight, × play_prob. Adjust the prediction.
+                                    # Multipliers must match the live formula in
+                                    # build_xpts_model — keep these in sync.
                                     expected_90s_bd = bd.get("expected_90s", 0) or 0
                                     play_prob_bd = bd.get("play_prob", 0) or 0
                                     bonus_adjustment = (
-                                        delta_bp90 * 0.75 * expected_90s_bd * 0.60 * play_prob_bd
+                                        delta_bp90 * 0.90 * expected_90s_bd * 0.70 * play_prob_bd
                                     )
                                     corrected_bonus = max(bd.get("bonus_pts", 0) - bonus_adjustment, 0)
                                     predicted_pts = predicted_pts - bd.get("bonus_pts", 0) + corrected_bonus
