@@ -1247,6 +1247,28 @@ def compute_form_weighted_xg(player_gw_data, n_recent=7):
                 weighted_mins += mins * weight
                 total_weight += weight
 
+        # Streak detection: returns (goals + assists) in the most recent 3
+        # GWs. A player on a hot run typically sustains it for another 1-3
+        # GWs — the standard 55/45 form blend already captures some of this
+        # via the elevated form xG/xA, but the blend dampens spikes too
+        # aggressively for genuinely in-form players. The streak factor
+        # adds a small multiplicative boost on top, calibrated to the
+        # strength of the recent run.
+        recent_3 = sorted_gws[:3]
+        recent_3_returns = sum(int(g.get("goals", 0) or 0) + int(g.get("assists", 0) or 0) for g in recent_3)
+        recent_3_mins = sum(g.get("minutes", 0) or 0 for g in recent_3)
+        recent_3_nineties = recent_3_mins / 90.0
+
+        streak_factor = 1.0
+        if recent_3_nineties >= 1.5:  # at least ~135 mins played in last 3
+            returns_per_90 = recent_3_returns / recent_3_nineties
+            if returns_per_90 >= 1.0:    # ~3 returns in 3 full games
+                streak_factor = 1.20
+            elif returns_per_90 >= 0.67:  # ~2 returns in 3 full games
+                streak_factor = 1.12
+            elif returns_per_90 >= 0.50:  # ~1.5 returns in 3 full games
+                streak_factor = 1.07
+
         if weighted_mins > 0 and total_weight > 0:
             nineties = weighted_mins / 90.0
             result[pid] = {
@@ -1255,6 +1277,8 @@ def compute_form_weighted_xg(player_gw_data, n_recent=7):
                 "xgc_form_per90": weighted_xgc / nineties,
                 "form_minutes": weighted_mins / total_weight,  # avg weighted mins
                 "form_gws": len(sorted_gws),
+                "streak_factor": streak_factor,
+                "recent_3_returns": recent_3_returns,
             }
 
     return result
@@ -1632,6 +1656,15 @@ def build_xpts_model(players_df, team_odds, teams_map, fixtures, current_gw_id,
             # projection (over/underperformance regression below catches the rest).
             xg_per90 = form_xg * 0.55 + season_xg * 0.45
             xa_per90 = form_xa * 0.55 + season_xa * 0.45
+
+            # Streak boost: players with 2+ returns over their last 3 GWs
+            # sustain that form more often than the standard form blend
+            # implies. Multiplicative factor 1.0-1.20 (set in
+            # compute_form_weighted_xg by recent_3_returns rate).
+            streak_factor = form_data.get("streak_factor", 1.0)
+            if streak_factor > 1.0:
+                xg_per90 *= streak_factor
+                xa_per90 *= streak_factor
         else:
             xg_per90 = season_xg
             xa_per90 = season_xa
@@ -2225,7 +2258,7 @@ def solve_best_xi(squad_df, xpts_col="xpts_next_gw"):
 # compute_rotation_risk, etc.). Streamlit's @st.cache_data hashes the decorated
 # function's source only — not its callees — so model updates can otherwise be
 # masked by stale cache. Treating the version as an argument forces invalidation.
-MODEL_VERSION = "2026.05.07.bonus_recalibration"
+MODEL_VERSION = "2026.05.11.form_streak_detector"
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -2935,6 +2968,18 @@ def find_best_single_transfer_for_gw(squad_df, all_players_df, bank,
     squad_df["xpts_gw"] = squad_df["id"].map(lambda pid: xpts_map.get(pid, {}).get(gw_id, 0))
     available["xpts_gw"] = available["id"].map(lambda pid: xpts_map.get(pid, {}).get(gw_id, 0))
 
+    # Next-2-GWs xPts: used by hit-timing logic to detect "catalyst" weeks
+    # where the IN player's near-term value justifies a hit even when this
+    # GW's marginal gain is modest (e.g., a premium with a great fixture
+    # run starting now whose THIS-GW gain is only +2 but NEXT-GW gain is +6).
+    next_two_gws = [gw_id, gw_id + 1] if (gw_id + 1) < horizon_end else [gw_id]
+    squad_df["xpts_2gw"] = squad_df["id"].map(
+        lambda pid: sum(xpts_map.get(pid, {}).get(g, 0) for g in next_two_gws)
+    )
+    available["xpts_2gw"] = available["id"].map(
+        lambda pid: sum(xpts_map.get(pid, {}).get(g, 0) for g in next_two_gws)
+    )
+
     # Rank squad players within their position (rank 0 = highest xpts_horizon)
     squad_df["pos_rank"] = (
         squad_df.groupby("pos_id")["xpts_horizon_raw"]
@@ -2993,12 +3038,14 @@ def find_best_single_transfer_for_gw(squad_df, all_players_df, bank,
             horizon_gain = in_value - out_value
             if horizon_gain > best_gain and horizon_gain > 0.05:
                 gw_gain = in_p["xpts_gw"] - out_p["xpts_gw"]
+                two_gw_gain = in_p["xpts_2gw"] - out_p["xpts_2gw"]
                 best_gain = horizon_gain
                 best = {
                     "out": out_p.to_dict(),
                     "in": in_p.to_dict(),
                     "xpts_gain": round(horizon_gain, 2),
                     "xpts_gw_gain": round(gw_gain, 2),
+                    "xpts_2gw_gain": round(two_gw_gain, 2),  # for catalyst-hit detection
                     "new_bank": int(budget_avail - in_p["now_cost"]),
                 }
 
@@ -3706,19 +3753,23 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
                     if transfer["xpts_gain"] < 0.3:
                         break  # marginal gain, stop
             else:
-                # Hit threshold: only take the hit if the THIS-GW gain alone
-                # is >= 4. The naive "horizon gain > 4" comparison was wrong —
-                # the real alternative to a hit is "wait one GW and do this
-                # transfer for free with next week's FT", which only loses
-                # ONE GW of advantage, not the whole horizon. The condition
-                # for hit to beat wait reduces to:
-                #     In_thisGW - Out_thisGW >= hit_cost (4)
-                # because every future GW is equal under both branches (we
-                # own the new player either way). Using horizon gain caused
-                # the planner to recommend -8 / -12 hits for marginal
-                # multi-week advantages a free transfer next GW would
-                # capture without paying.
-                if transfer["xpts_gw_gain"] < 4.0:
+                # Hit threshold — two acceptance conditions:
+                #   1. Single-GW gain >= 4 (the standard rule: hit pays for
+                #      itself within this GW alone, so it strictly beats
+                #      waiting for next week's FT).
+                #   2. Two-GW gain >= 7 (the "catalyst" rule: even if THIS
+                #      GW's gain is modest, a player on a strong upcoming
+                #      run (e.g., DGW36 + favourable fixture) can justify a
+                #      hit because waiting one GW would secure them at the
+                #      cost of THIS GW + missing momentum. 7 pts over 2 GWs
+                #      = 3.5/GW which still meaningfully beats the 4-pt cost
+                #      when averaged with the deferred FT alternative.
+                # Either condition triggers; both protect against the old
+                # "horizon gain > 4" mistake that recommended -8/-12 hits
+                # for marginal multi-week advantages.
+                gw_gain = transfer["xpts_gw_gain"]
+                two_gw_gain = transfer.get("xpts_2gw_gain", gw_gain)
+                if gw_gain < 4.0 and two_gw_gain < 7.0:
                     break
                 total_hit += 4
 
@@ -5159,14 +5210,59 @@ def main():
             st.dataframe(tp, use_container_width=True, height=540)
 
         st.markdown("")
-        st.markdown('<div class="section-header">Differentials — Under 10% Ownership</div>', unsafe_allow_html=True)
-        diffs = qualified[(qualified["selected_pct"] < 10) & (qualified["xpts_total"] > 0)].nlargest(10, "xpts_total")
-        if len(diffs) > 0:
-            dd = diffs[["name", "team", "pos", "price", "selected_pct", "xpts_total", "value"]].copy()
-            dd.columns = ["Player", "Team", "Pos", "Price", "Own%", "xPts 6GW", "Value"]
+        st.markdown(
+            '<div class="section-header">Differentials — Rank-Winning Picks '
+            '<span class="source-tag src-model">Low Ownership × High xPts</span></div>',
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            "A differential is a low-owned (< 15%) player you can ride to a big rank jump. "
+            "'Diff Edge' = xPts × (1 + (100 − Own%)/100): a 5%-owned player with 10 xPts scores "
+            "higher than a 60%-owned player with the same xPts. Top picks by position below."
+        )
+        # Differential Edge — heavily reward low ownership for the same xPts
+        diff_pool = qualified[(qualified["xpts_total"] > 0) & (qualified["selected_pct"] < 15)].copy()
+        if len(diff_pool) > 0:
+            diff_pool["diff_edge"] = diff_pool["xpts_total"] * (
+                1 + (100 - diff_pool["selected_pct"].clip(0, 100)) / 100
+            )
+
+            # Overall top differentials
+            top_diffs = diff_pool.nlargest(10, "diff_edge")
+            dd = top_diffs[["name", "team", "pos", "price", "selected_pct", "xpts_total", "diff_edge"]].copy()
+            dd.columns = ["Player", "Team", "Pos", "Price", "Own%", "xPts 6GW", "Diff Edge"]
+            dd["Diff Edge"] = dd["Diff Edge"].round(1)
+            dd["Own%"] = dd["Own%"].round(1)
             dd = dd.reset_index(drop=True)
             dd.index += 1
+            st.markdown("**Top 10 by Differential Edge**")
             st.dataframe(dd, use_container_width=True, height=380)
+
+            # Per-position breakdown — sometimes the best differential is the
+            # 6th-best DEF, not the player who happens to top the overall list
+            st.markdown("")
+            st.markdown("**Best Differential Per Position**")
+            pos_diff_cols = st.columns(4)
+            pos_labels = [(1, "GK", pos_diff_cols[0]), (2, "DEF", pos_diff_cols[1]),
+                          (3, "MID", pos_diff_cols[2]), (4, "FWD", pos_diff_cols[3])]
+            for pos_id, pos_label, col in pos_labels:
+                top_at_pos = diff_pool[diff_pool["pos_id"] == pos_id].nlargest(3, "diff_edge")
+                with col:
+                    st.markdown(f"<div style='color:#f02d6e;font-weight:600;font-size:0.85rem;'>{pos_label}</div>", unsafe_allow_html=True)
+                    if len(top_at_pos) > 0:
+                        for _, p in top_at_pos.iterrows():
+                            st.markdown(
+                                f"<div style='font-size:0.78rem;line-height:1.3;color:#cfd5e3;margin-bottom:6px;'>"
+                                f"<strong>{p['name']}</strong> ({p['team']}) · £{p['price']:.1f}m<br>"
+                                f"<span style='color:#8892a8;font-size:0.7rem;'>"
+                                f"{p['selected_pct']:.1f}% own · {p['xpts_total']:.1f} xPts</span>"
+                                f"</div>",
+                                unsafe_allow_html=True,
+                            )
+                    else:
+                        st.markdown("<span style='color:#5a6580;font-size:0.75rem;'>—</span>", unsafe_allow_html=True)
+        else:
+            st.info("No qualifying differentials in the candidate pool right now.")
 
         # ==================== CAPTAIN OPTIMISER ====================
         st.markdown("")
