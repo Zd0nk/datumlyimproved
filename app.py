@@ -3713,18 +3713,40 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
         remaining_ft = max(current_ft - transfers_ft_used, 0)
         max_transfers = min(remaining_ft + 2, 7)
 
-        # === VALUE OF ROLLING A FREE TRANSFER ===
-        # Banking a FT gives you flexibility next week.
-        # Estimated value of an extra FT = ~1.5-2.5 xPts (the average gain from
-        # the best available transfer next week). This means we should only
-        # USE a free transfer if the gain exceeds this threshold.
-        # The value diminishes as we approach max FTs (5) since we'd waste the roll.
+        # === VALUE OF ROLLING A FREE TRANSFER (multi-week lookahead) ===
+        # Static base — flexibility premium when we're far from the 5-FT cap.
         if current_ft >= 5:
             roll_value = 0.0  # already at max, must use or lose
         elif current_ft >= 3:
-            roll_value = 1.0  # already have good flexibility, lower bar
+            roll_value = 1.0
         else:
-            roll_value = 1.5  # banking from 1→2 or 2→3 is very valuable
+            roll_value = 1.5
+
+        # Dynamic upgrade: look at NEXT GW's best available transfer. If
+        # there's a better transfer queued up for next GW than this GW,
+        # rolling the FT to enable it has real opportunity value — equal to
+        # that next-GW transfer's gw_gain (since we'd be able to make it
+        # for free with the saved FT). Apply a small uncertainty discount.
+        # This captures the "multi-week MILP" intuition without the full
+        # combinatorial cost: we choose between (transfer now, roll for
+        # next GW transfer) at each step.
+        if gw + 1 < horizon_end:
+            try:
+                next_gw_transfer = find_best_single_transfer_for_gw(
+                    current_squad, transfer_pool, current_bank,
+                    current_purchase, current_selling, xpts_map, gw + 1,
+                    exclude_ids=recently_sold | transfer_exclude,
+                    horizon_end=horizon_end,
+                    bb_gws=bb_gws_in_horizon,
+                )
+                if next_gw_transfer is not None:
+                    # Next-GW gain minus 0.5 (uncertainty discount): the player
+                    # might be available now AND next GW, but their xPts can
+                    # shift between now and then.
+                    next_gw_value = max(next_gw_transfer.get("xpts_gw_gain", 0) - 0.5, 0)
+                    roll_value = max(roll_value, next_gw_value)
+            except Exception:
+                pass  # lookahead is best-effort — fall back to static base
 
         for t_num in range(max_transfers):
             transfer = find_best_single_transfer_for_gw(
@@ -3743,15 +3765,21 @@ def build_rolling_plan(my_squad_df, all_players_df, bank, free_transfers,
             hit_number = t_num - current_ft + 1 if not is_free else 0
 
             if is_free:
-                # Only use the FT if the gain exceeds the value of rolling
-                # First FT: compare against roll_value
-                # Second+ FT: lower threshold (we've already decided to use at least one)
+                # Use the FT only if THIS GW's gain exceeds the opportunity
+                # cost of rolling. We compare on gw_gain (not horizon_gain)
+                # because waiting one GW only costs THIS GW's contribution —
+                # for every future GW we'd own the same player either way.
+                # roll_value is now dynamic: it equals max(static_base,
+                # next_gw_best_transfer_gain), so rolling is correctly
+                # preferred when a juicier transfer is queued for next GW.
                 if t_num == 0:
-                    if transfer["xpts_gain"] < roll_value:
+                    if transfer["xpts_gw_gain"] < roll_value:
                         break  # better to roll the FT
                 else:
-                    if transfer["xpts_gain"] < 0.3:
-                        break  # marginal gain, stop
+                    # Second+ FT: lower bar because we've already committed
+                    # to spending at least one transfer this GW
+                    if transfer["xpts_gw_gain"] < 0.3:
+                        break
             else:
                 # Hit threshold — two acceptance conditions:
                 #   1. Single-GW gain >= 4 (the standard rule: hit pays for
