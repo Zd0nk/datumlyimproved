@@ -159,7 +159,7 @@ LEAGUE_CONFIGS = {
 # Default league (will be overridden by UI selection)
 ACTIVE_LEAGUE = "FPL"
 st.set_page_config(
-    page_title="Datumly - FPL Analytics",
+    page_title="datumly - FPL Analytics",
     page_icon="favicon.svg",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -3892,6 +3892,33 @@ def format_next_opponents(team_id, gw_id, upcoming_map, teams_dict):
     return "vs " + ", ".join(parts)
 
 
+def format_horizon_opponents(team_id, gw_start, n_gws, upcoming_map, teams_dict):
+    """Return a compact multi-GW opponent string for the planning horizon.
+
+    Example: 'WOL(H) · LEE(A) · MUN(H)' for a 3-GW horizon. Handles:
+      - blanks: dash placeholder
+      - DGWs: comma-separated within the GW slot (e.g., 'WOL(H),LEE(A)')
+
+    Designed to fit on a single line under each pitch shirt — verbose
+    'vs ' prefix dropped to save horizontal space.
+    """
+    parts = []
+    for offset in range(n_gws):
+        gw = gw_start + offset
+        fixtures = [f for f in upcoming_map.get(team_id, []) if f.get("gw") == gw]
+        if not fixtures:
+            parts.append("—")
+            continue
+        slot_parts = []
+        for fix in fixtures:
+            opp_id = fix.get("opp_id", fix.get("opp"))
+            opp = teams_dict.get(opp_id, {}).get("short_name", "?")
+            venue = "H" if fix.get("home") else "A"
+            slot_parts.append(f"{opp}({venue})")
+        parts.append(",".join(slot_parts))
+    return " · ".join(parts)
+
+
 def render_fdr(upcoming, teams):
     """Render fixture difficulty badges."""
     badges = []
@@ -4334,7 +4361,7 @@ def main():
                                 is_cap = p.get("is_captain", False)
                                 cap_badge = " (C)" if is_cap else (" (V)" if p.get("is_vice", False) else "")
                                 shirt_svg = make_shirt_svg(p["team"], f"{p['xpts_next_gw']:.1f}", is_gk=is_gk, is_captain=is_cap, player_name=p.get("name", ""), team_code=int(p.get("team_code", 0) or 0))
-                                opp_str = format_next_opponents(p["team_id"], planning_gw_id, upcoming_map, teams)
+                                opp_str = format_horizon_opponents(p["team_id"], planning_gw_id, n_planning_gws, upcoming_map, teams)
                                 with cols[i]:
                                     html = f'<div style="text-align:center;">{shirt_svg}<div class="pitch-name">{p["name"]}{cap_badge}</div><div class="pitch-opp">{opp_str}</div><div class="pitch-price">£{p["price"]:.1f}m · {p["xpts_total"]:.1f} xPts</div></div>'
                                     st.markdown(html, unsafe_allow_html=True)
@@ -4345,7 +4372,7 @@ def main():
                         for i, (_, p) in enumerate(bench.iterrows()):
                             is_gk = (p["pos_id"] == 1)
                             shirt_svg = make_shirt_svg(p["team"], f"{p['xpts_next_gw']:.1f}", is_gk=is_gk, width=44, height=44, player_name=p.get("name", ""), team_code=int(p.get("team_code", 0) or 0))
-                            opp_str = format_next_opponents(p["team_id"], planning_gw_id, upcoming_map, teams)
+                            opp_str = format_horizon_opponents(p["team_id"], planning_gw_id, n_planning_gws, upcoming_map, teams)
                             with bcols[i]:
                                 html = f'<div style="text-align:center;opacity:0.6;">{shirt_svg}<div class="pitch-name">{p["name"]}</div><div class="pitch-opp">{opp_str}</div><div class="pitch-price">{p["pos"]} · £{p["price"]:.1f}m</div></div>'
                                 st.markdown(html, unsafe_allow_html=True)
@@ -5611,7 +5638,9 @@ def main():
 
                 st.markdown("")
 
-                # Render pitch view
+                # Render pitch view — show the full horizon's fixture sequence
+                # under each shirt so the user can scan opponents at a glance
+                # when validating the solver's picks.
                 if xi is not None:
                     for pid, plabel in [(4, "Forwards"), (3, "Midfielders"), (2, "Defenders"), (1, "Goalkeeper")]:
                         pp = xi[xi["pos_id"] == pid]
@@ -5621,7 +5650,7 @@ def main():
                             for i, (_, p) in enumerate(pp.iterrows()):
                                 is_gk = (p["pos_id"] == 1)
                                 shirt_svg = make_shirt_svg(p["team"], f"{p['xpts_next_gw']:.1f}", is_gk=is_gk, player_name=p.get("name", ""), team_code=int(p.get("team_code", 0) or 0))
-                                opp_str = format_next_opponents(p["team_id"], planning_gw_id, upcoming_map, teams)
+                                opp_str = format_horizon_opponents(p["team_id"], planning_gw_id, n_planning_gws, upcoming_map, teams)
                                 with cols[i]:
                                     html = f'<div style="text-align:center;">{shirt_svg}<div class="pitch-name">{p["name"]}</div><div class="pitch-opp">{opp_str}</div><div class="pitch-price">£{p["price"]:.1f}m · {p["form_str"]}</div></div>'
                                     st.markdown(html, unsafe_allow_html=True)
@@ -5638,7 +5667,7 @@ def main():
                     for i, (_, p) in enumerate(bench.iterrows()):
                         is_gk = (p["pos_id"] == 1)
                         shirt_svg = make_shirt_svg(p["team"], f"{p['xpts_next_gw']:.1f}", is_gk=is_gk, width=44, height=44, player_name=p.get("name", ""), team_code=int(p.get("team_code", 0) or 0))
-                        opp_str = format_next_opponents(p["team_id"], planning_gw_id, upcoming_map, teams)
+                        opp_str = format_horizon_opponents(p["team_id"], planning_gw_id, n_planning_gws, upcoming_map, teams)
                         with bcols[i]:
                             html = f'<div style="text-align:center;opacity:0.65;">{shirt_svg}<div class="pitch-name">{p["name"]}</div><div class="pitch-opp">{opp_str}</div><div class="pitch-price">{p["pos"]} · £{p["price"]:.1f}m</div></div>'
                             st.markdown(html, unsafe_allow_html=True)
