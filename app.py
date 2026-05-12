@@ -3368,30 +3368,7 @@ def _captain_score(squad_df, xpts_map, gw_id):
         risk_factor = 0.5 + 0.5 * sq["start_prob"].fillna(0.85).clip(0, 1)
     else:
         risk_factor = 1.0
-
-    # Ceiling weighting: captain decisions should prefer UPSIDE VARIANCE
-    # because the 2x multiplier amplifies hauls more than blanks (blanks
-    # are already handled by the risk_factor above). Two players with
-    # similar mean xPts have very different captain ceilings:
-    #   - FWD with 7 xPts: heavy upper tail (chance of 15-20 pt hauls)
-    #   - DEF with 7 xPts: tight distribution (CS + occasional goal)
-    # Use position as a coarse ceiling proxy — premium attackers haul
-    # in 10-15% of GWs, premium defenders haul in ~3%. xg_per90 +
-    # xa_per90 sharpen this for low-output attackers vs. attacking
-    # defenders (e.g., wing-backs with goal threat).
-    ceiling_factor = pd.Series(1.0, index=sq.index)
-    if "pos_id" in sq.columns:
-        pos_ceiling = {1: 0.85, 2: 0.92, 3: 1.00, 4: 1.08}
-        ceiling_factor = ceiling_factor * sq["pos_id"].map(pos_ceiling).fillna(1.0)
-    if "xg_per90" in sq.columns and "xa_per90" in sq.columns:
-        attacking = (
-            pd.to_numeric(sq["xg_per90"], errors="coerce").fillna(0)
-            + pd.to_numeric(sq["xa_per90"], errors="coerce").fillna(0)
-        )
-        # Premium attackers (xg+xa per 90 > 0.5) get up to +10% ceiling
-        ceiling_factor = ceiling_factor * (1.0 + (attacking.clip(0, 1.0) * 0.10))
-
-    sq["captain_score"] = sq["xpts_gw"] * risk_factor * ceiling_factor
+    sq["captain_score"] = sq["xpts_gw"] * risk_factor
     return sq, sq["captain_score"]
 
 
