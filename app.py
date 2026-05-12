@@ -3892,6 +3892,83 @@ def format_next_opponents(team_id, gw_id, upcoming_map, teams_dict):
     return "vs " + ", ".join(parts)
 
 
+def apply_lineup_overrides(df, xpts_map, overrides, gw_id=None):
+    """Apply user-supplied lineup overrides to df and xpts_map.
+
+    The model's `projected_start_prob` is a backward-looking 7-GW signal —
+    it can't see press conferences, training reports, or last-minute team
+    news. Power FPL managers research predicted lineups every matchweek
+    and already know much more than the model does. This helper lets that
+    knowledge feed back into the xPts: a player the user has confirmed as
+    a starter gets their xPts scaled up to reflect a 0.98 play probability;
+    a doubtful player is scaled down; a confirmed-out player is zeroed.
+
+    overrides: dict {player_id: "starter" | "doubt" | "out"}
+        Anything not in the dict (or set to "default") keeps the model's
+        original projection.
+    gw_id: optional. If provided, applies overrides ONLY to that GW in
+        xpts_map (next-GW intel doesn't necessarily extend to future GWs).
+        If None, applies to all GWs in xpts_map.
+
+    Returns: (df_adjusted, xpts_map_adjusted) — both are fresh copies;
+    inputs are not mutated.
+    """
+    if not overrides:
+        return df, xpts_map
+
+    df_adj = df.copy()
+    xpts_map_adj = {pid: dict(gws) for pid, gws in xpts_map.items()}
+
+    for pid, status in overrides.items():
+        if status in (None, "default"):
+            continue
+        rows = df_adj[df_adj["id"] == pid]
+        if len(rows) == 0:
+            continue
+        idx = rows.index[0]
+        if "start_prob" in df_adj.columns:
+            original_sp = float(df_adj.at[idx, "start_prob"] or 0)
+        else:
+            original_sp = 0.85
+        original_sp = max(original_sp, 0.05)  # divide-by-zero guard
+
+        if status == "starter":
+            # Scale up to 0.98 play probability — cap the scale to avoid
+            # blowing up players the model already barely projected (a
+            # 5%-start-prob player scaled to 0.98 would 20x; not realistic).
+            scale = min(0.98 / original_sp, 2.5)
+        elif status == "doubt":
+            # Scale toward 0.50 play prob, but only downward (don't lift
+            # already-low projections, only dampen confidently-nailed ones)
+            scale = min(0.50 / original_sp, 1.0)
+        elif status == "out":
+            scale = 0.0
+        else:
+            continue
+
+        if scale == 1.0:
+            continue  # no-op
+
+        # Apply to single-GW + total xpts (visible on pitch view)
+        if "xpts_next_gw" in df_adj.columns:
+            df_adj.at[idx, "xpts_next_gw"] = float(df_adj.at[idx, "xpts_next_gw"]) * scale
+        if "xpts_total" in df_adj.columns:
+            df_adj.at[idx, "xpts_total"] = float(df_adj.at[idx, "xpts_total"]) * scale
+
+        # Apply to xpts_map (used by planner, captain, optimizer)
+        if pid in xpts_map_adj:
+            if gw_id is not None:
+                # Single-GW override (user confirmed for THIS GW only)
+                if gw_id in xpts_map_adj[pid]:
+                    xpts_map_adj[pid][gw_id] = xpts_map_adj[pid][gw_id] * scale
+            else:
+                # Apply to all GWs (assume the override reflects ongoing role)
+                for g in xpts_map_adj[pid]:
+                    xpts_map_adj[pid][g] = xpts_map_adj[pid][g] * scale
+
+    return df_adj, xpts_map_adj
+
+
 def format_horizon_opponents(team_id, gw_start, n_gws, upcoming_map, teams_dict):
     """Return a compact multi-GW opponent string for the planning horizon.
 
@@ -4165,6 +4242,15 @@ def main():
     # window is shown. Floors at 1 to keep loops well-defined on the final GW.
     n_planning_gws = max(1, min(6, LC["season_gws"] - planning_gw_id + 1))
 
+    # Apply user lineup overrides globally — overrides are set in the My Team
+    # tab and propagate to ALL tabs (planner, captain, optimal squad, etc.)
+    # so the user's predicted-lineup intel actually feeds into every decision.
+    # The override applies to the next GW specifically (since press-conference
+    # info is GW-specific), not the whole horizon.
+    _lineup_overrides = st.session_state.get("lineup_overrides", {})
+    if _lineup_overrides:
+        df, xpts_map = apply_lineup_overrides(df, xpts_map, _lineup_overrides, gw_id=planning_gw_id)
+
     # === Slim top status strip ===
     if current_gw:
         deadline = datetime.fromisoformat(current_gw["deadline_time"].replace("Z", "+00:00"))
@@ -4335,6 +4421,82 @@ def main():
                     my_squad["is_vice"] = my_squad["id"].map(
                         lambda pid: team_data["vice_captains"].get(pid, False)
                     )
+
+                    # === LINEUP OVERRIDES ===
+                    # Power-user feature: when you've checked predicted lineups
+                    # (FFScout, livescore.bz, press conferences, etc.) and know
+                    # something the model can't, flag it here. Overrides feed
+                    # into ALL xPts displays + optimizer decisions, not just
+                    # the visual.
+                    _existing_overrides = st.session_state.get("lineup_overrides", {})
+                    _active_count = sum(1 for s in _existing_overrides.values() if s not in (None, "default"))
+                    _expander_label = (
+                        "📋 Lineup Overrides — apply your predicted-lineup intel"
+                        + (f"  ·  {_active_count} active" if _active_count else "")
+                    )
+                    with st.expander(_expander_label, expanded=False):
+                        st.caption(
+                            "Top managers research predicted lineups every matchweek and "
+                            "know things the model can't (press conferences, training reports, "
+                            "last-minute news). Flag your squad members below — the model will "
+                            "scale their xPts accordingly:  **Starter** → 98% play prob, "
+                            "**Doubt** → 50% play prob, **Out** → 0%."
+                        )
+                        # Two-column grid: 8 players per column for a 15-man squad
+                        sorted_squad = my_squad.sort_values(
+                            ["is_starter", "pos_id", "xpts_total"],
+                            ascending=[False, True, False],
+                        )
+                        override_cols = st.columns(2)
+                        options = ["default", "starter", "doubt", "out"]
+                        labels = {
+                            "default": "Default (use model)",
+                            "starter": "✅ Starter",
+                            "doubt": "⚠️ Doubt",
+                            "out": "❌ Out",
+                        }
+                        new_overrides = dict(_existing_overrides)
+                        for i, (_, _p) in enumerate(sorted_squad.iterrows()):
+                            _pid = int(_p["id"])
+                            _col = override_cols[i % 2]
+                            _current = _existing_overrides.get(_pid, "default")
+                            try:
+                                _idx = options.index(_current)
+                            except ValueError:
+                                _idx = 0
+                            with _col:
+                                _new = st.selectbox(
+                                    f"{_p['name']} ({_p['team']}, {_p['pos']})",
+                                    options=options,
+                                    format_func=lambda o: labels[o],
+                                    index=_idx,
+                                    key=f"lineup_override_{_pid}",
+                                )
+                                if _new == "default":
+                                    new_overrides.pop(_pid, None)
+                                else:
+                                    new_overrides[_pid] = _new
+
+                        # Apply / clear
+                        b_apply, b_clear = st.columns(2)
+                        with b_apply:
+                            if st.button("Apply overrides", use_container_width=True, type="primary",
+                                        key="apply_lineup_overrides"):
+                                st.session_state["lineup_overrides"] = new_overrides
+                                st.cache_data.clear()
+                                st.rerun()
+                        with b_clear:
+                            if st.button("Clear all overrides", use_container_width=True,
+                                        key="clear_lineup_overrides"):
+                                st.session_state["lineup_overrides"] = {}
+                                st.cache_data.clear()
+                                st.rerun()
+
+                        if _active_count:
+                            st.info(
+                                f"{_active_count} override(s) currently active — xPts displayed "
+                                f"throughout the app reflect these adjustments."
+                            )
 
                     # Show current squad
                     st.subheader("Your Current Squad")
