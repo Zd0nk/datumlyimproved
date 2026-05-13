@@ -5175,9 +5175,19 @@ def main():
                                                 bench_label = "💪 BENCH BOOST — all bench players score:"
                                             else:
                                                 bench_label = "Bench:"
+                                            # Sort bench: GK always first (FPL convention for
+                                            # auto-sub fallback), then outfielders by per-GW xPts
+                                            # descending so the highest-EV substitute is listed
+                                            # next.
+                                            bench_sorted = bench.copy()
+                                            bench_sorted["_gk_first"] = (bench_sorted["pos_id"] != 1).astype(int)
+                                            bench_sorted = bench_sorted.sort_values(
+                                                ["_gk_first", "xpts_gw"], ascending=[True, False]
+                                            ).drop(columns="_gk_first")
+
                                             # Build bench string with each player's opponent for this GW
                                             bench_parts = []
-                                            for _, r in bench.iterrows():
+                                            for _, r in bench_sorted.iterrows():
                                                 r_opp = format_next_opponents(
                                                     r.get("team_id", 0), gw, upcoming_map, teams
                                                 )
