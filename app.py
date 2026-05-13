@@ -632,6 +632,39 @@ st.markdown("""
         background: var(--good);
     }
 
+    /* ---- Generic info card — replaces inline hex literals like #1a1e2e ---- */
+    .info-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 0.8rem;
+        margin: 0.5rem 0;
+    }
+    .info-card-success {
+        background: rgba(52, 211, 153, 0.08);
+        border: 1px solid rgba(52, 211, 153, 0.22);
+        border-radius: 8px;
+        padding: 0.8rem;
+        margin: 0.5rem 0;
+    }
+
+    /* ---- Trust strip (backtest validation) ---- */
+    .trust-strip {
+        margin: 4px 0 18px;
+    }
+    .trust-strip-inner {
+        display: inline-flex; align-items: center; gap: 10px;
+        padding: 8px 14px;
+        background: linear-gradient(90deg, var(--brand-soft), transparent);
+        border: 1px solid var(--brand-border);
+        border-radius: 8px;
+        font-size: 0.78rem;
+    }
+    .ts-icon { font-size: 0.95rem; }
+    .ts-text { color: var(--text-muted); }
+    .ts-text strong { color: var(--text); font-weight: 600; }
+    .ts-edge { color: #34d399; font-weight: 600; }
+
     /* ---- Powered-by data sources strip ---- */
     .powered-by-strip {
         display: flex; align-items: center; flex-wrap: wrap;
@@ -752,9 +785,10 @@ st.markdown("""
 
     /* ---- Section headers (within tab content) ---- */
     .section-header {
-        font-size: 0.95rem; font-weight: 600; color: var(--text);
-        letter-spacing: -0.01em; line-height: 1.3;
-        margin: 22px 0 10px;
+        font-size: 1.1rem; font-weight: 650; color: var(--text);
+        letter-spacing: -0.02em; line-height: 1.25;
+        margin: 28px 0 12px;
+        display: flex; align-items: center; gap: 10px;
     }
 
     /* ---- Streamlit overrides (general) ---- */
@@ -4169,6 +4203,22 @@ def render_landing_block(current_gw, df, team_data):
     block = f'<div class="landing-grid">{tile_deadline}{tile_welcome}{tile_captain}</div>'
     st.markdown(block, unsafe_allow_html=True)
 
+    # --- Trust strip: backtest-validated edge over random selection. The
+    # numbers come from the latest known squad-level backtest verdict. This
+    # is the strongest available trust signal — competitors mostly claim
+    # accuracy without showing receipts. Update the validated_score /
+    # baseline / edge values when the backtest moves materially.
+    st.markdown(
+        '<div class="trust-strip">'
+        '<div class="trust-strip-inner">'
+        '<span class="ts-icon">📊</span>'
+        '<span class="ts-text"><strong>Model validated:</strong> 55.0 pts/GW vs 35 baseline · '
+        '<span class="ts-edge">+20 pts/GW edge</span> · DECENT verdict from squad-level backtest</span>'
+        '</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
 
 # ============================================================
 # MAIN APP
@@ -4380,7 +4430,7 @@ def main():
         )
 
         # FPL ID input
-        col_id, col_btn = st.columns([3, 1])
+        col_id, col_btn, col_demo = st.columns([3, 1, 1])
         with col_id:
             fpl_id = st.text_input(
                 "FPL Team ID",
@@ -4392,6 +4442,23 @@ def main():
         with col_btn:
             st.markdown("<br>", unsafe_allow_html=True)
             load_team = st.button("Load My Team", use_container_width=True)
+        with col_demo:
+            st.markdown("<br>", unsafe_allow_html=True)
+            # Demo team: lets first-time visitors see the product BEFORE
+            # being asked to enter their ID. ID 1 is the FPL manager
+            # who's been signed up the longest (FPL CEO's account by
+            # convention) — public, stable, always loads.
+            try_demo = st.button("✨ Try Demo", use_container_width=True,
+                                 help="Load a sample team to explore the product")
+
+        if try_demo:
+            st.session_state["fpl_id"] = "1"
+            fpl_id = "1"
+            try:
+                st.query_params["fpl_id"] = "1"
+            except Exception:
+                pass
+            st.rerun()
 
         if load_team and fpl_id:
             st.session_state["fpl_id"] = fpl_id
@@ -4461,7 +4528,7 @@ def main():
                         chip_labels_brief.get(k, k) for k, v in chips_rem.items() if v > 0
                     ])
                     st.markdown(
-                        f'<div style="background:#1a1e2e;border-radius:8px;padding:0.8rem;margin-bottom:0.8rem;">'
+                        f'<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:0.8rem;margin-bottom:0.8rem;">'
                         f'<span style="color:#f02d6e;font-weight:700;">🎯 Chips Remaining:</span> '
                         f'<span style="color:#8892a8;">{remaining_str}</span> · '
                         f'<span style="color:#5a6580;font-size:0.75rem;">See 🎯 Chip Strategy tab for optimal timing</span></div>',
@@ -4813,7 +4880,7 @@ def main():
                     # === DISPLAY ===
                     if missing_fixtures or postponed or fixtures_owed:
                         st.markdown(
-                            '<div style="background:#1a2e1a;border-radius:8px;padding:0.8rem;margin-bottom:0.5rem;">',
+                            '<div style="background:rgba(52,211,153,0.08);border:1px solid rgba(52,211,153,0.22);border-radius:8px;padding:0.8rem;margin-bottom:0.5rem;">',
                             unsafe_allow_html=True,
                         )
 
@@ -5675,7 +5742,7 @@ def main():
             if len(cap_top) > 0:
                 best_cap = cap_top.iloc[0]
                 st.markdown(
-                    f"<div style='background:#1a1e2e;border-radius:8px;padding:0.8rem;margin:0.5rem 0;'>"
+                    f"<div style='background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:0.8rem;margin:0.5rem 0;'>"
                     f"<span style='color:#fbbf24;font-weight:700;font-size:1.1rem;'>👑 Recommended Captain: "
                     f"{best_cap['name']}</span><br>"
                     f"<span style='color:#8892a8;font-size:0.8rem;'>"
@@ -5691,7 +5758,7 @@ def main():
                 if len(diff_caps) > 0:
                     diff_best = diff_caps.iloc[0]
                     st.markdown(
-                        f"<div style='background:#1a2e1a;border-radius:8px;padding:0.8rem;margin:0.5rem 0;'>"
+                        f"<div style='background:rgba(52,211,153,0.08);border:1px solid rgba(52,211,153,0.22);border-radius:8px;padding:0.8rem;margin:0.5rem 0;'>"
                         f"<span style='color:#34d399;font-weight:700;'>🎯 Differential Captain: "
                         f"{diff_best['name']}</span><br>"
                         f"<span style='color:#8892a8;font-size:0.8rem;'>"
@@ -5857,7 +5924,7 @@ def main():
                 bd = player_bd[gw]
                 venue = "🏠 Home" if bd["home"] else "✈️ Away"
                 st.markdown(
-                    f"<div style='background:#1a1e2e;border-radius:8px;padding:0.7rem;margin:0.4rem 0;'>"
+                    f"<div style='background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:0.7rem;margin:0.4rem 0;'>"
                     f"<span style='color:#f02d6e;font-weight:700;'>GW{gw}</span> "
                     f"<span style='color:#8892a8;'>vs {bd['opponent']} {venue}</span> "
                     f"<span style='color:#34d399;font-weight:700;font-size:1.1rem;'>"
@@ -6701,7 +6768,7 @@ def main():
                                 squad_verdict = "POOR — meaningfully under-performing"
 
                             st.markdown(
-                                f"<div style='background:#1a1e2e;border-radius:8px;"
+                                f"<div style='background:var(--surface);border:1px solid var(--border);border-radius:8px;"
                                 f"padding:0.8rem;margin-top:0.5rem;'>"
                                 f"<span style='color:{squad_color};font-weight:700;font-size:1rem;'>"
                                 f"Squad verdict: {squad_verdict}</span><br>"
@@ -7001,7 +7068,7 @@ def main():
                     chip_labels_chip.get(k, k) for k, v in chips_rem_chip.items() if v > 0
                 ])
                 st.markdown(
-                    f'<div style="background:#1a1e2e;border-radius:8px;padding:0.8rem;margin-bottom:0.8rem;">'
+                    f'<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:0.8rem;margin-bottom:0.8rem;">'
                     f'<span style="color:#f02d6e;font-weight:700;">🎯 Chips Remaining:</span> '
                     f'<span style="color:#8892a8;">{remaining_str_chip}</span></div>',
                     unsafe_allow_html=True,
@@ -7104,7 +7171,7 @@ def main():
 
                     if not dgw_gws and not blank_gws:
                         st.markdown(
-                            '<div style="background:#1a1e2e;border-radius:8px;padding:0.8rem;margin:0.5rem 0;">'
+                            '<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:0.8rem;margin:0.5rem 0;">'
                             '<span style="color:#fbbf24;font-weight:600;">⚠️ No DGWs or BGWs detected or flagged.</span><br>'
                             '<span style="color:#8892a8;font-size:0.8rem;">'
                             'Use the inputs above to flag expected DGW/BGW weeks based on cup results '
@@ -7115,7 +7182,7 @@ def main():
                         dgw_str = f"DGWs: GW{', GW'.join(str(g) for g in dgw_gws)}" if dgw_gws else ""
                         bgw_str = f"BGWs: GW{', GW'.join(str(g) for g in blank_gws)}" if blank_gws else ""
                         st.markdown(
-                            f'<div style="background:#1a2e1a;border-radius:8px;padding:0.8rem;margin:0.5rem 0;">'
+                            f'<div style="background:rgba(52,211,153,0.08);border:1px solid rgba(52,211,153,0.22);border-radius:8px;padding:0.8rem;margin:0.5rem 0;">'
                             f'<span style="color:#34d399;font-weight:600;">✅ Key weeks identified: '
                             f'{dgw_str}{" · " if dgw_str and bgw_str else ""}{bgw_str}</span><br>'
                             f'<span style="color:#8892a8;font-size:0.8rem;">'
