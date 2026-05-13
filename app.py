@@ -5162,8 +5162,12 @@ def main():
                                                     is_cap = (captain is not None and p["id"] == captain.get("id"))
                                                     gw_xpts = p.get("xpts_gw", 0)
                                                     shirt_svg = make_shirt_svg(p.get("team", "???"), f"{gw_xpts:.1f}", is_gk=is_gk, is_captain=is_cap, player_name=p.get("name", ""), team_code=int(p.get("team_code", 0) or 0))
+                                                    # Show THIS GW's opponent — different from the main
+                                                    # pitch which shows the full horizon. Each expander
+                                                    # is GW-specific so we use the GW being rendered.
+                                                    opp_str = format_next_opponents(p.get("team_id", 0), gw, upcoming_map, teams)
                                                     with cols[ci]:
-                                                        html = f'<div style="text-align:center;">{shirt_svg}<div class="pitch-name">{p["name"]}</div><div class="pitch-price">£{p["price"]:.1f}m</div></div>'
+                                                        html = f'<div style="text-align:center;">{shirt_svg}<div class="pitch-name">{p["name"]}</div><div class="pitch-opp">{opp_str}</div><div class="pitch-price">£{p["price"]:.1f}m</div></div>'
                                                         st.markdown(html, unsafe_allow_html=True)
 
                                         if bench is not None and len(bench) > 0:
@@ -5171,10 +5175,18 @@ def main():
                                                 bench_label = "💪 BENCH BOOST — all bench players score:"
                                             else:
                                                 bench_label = "Bench:"
-                                            bench_names = ", ".join([
-                                                f"{r['name']} ({r.get('xpts_gw', 0):.1f})"
-                                                for _, r in bench.iterrows()
-                                            ])
+                                            # Build bench string with each player's opponent for this GW
+                                            bench_parts = []
+                                            for _, r in bench.iterrows():
+                                                r_opp = format_next_opponents(
+                                                    r.get("team_id", 0), gw, upcoming_map, teams
+                                                )
+                                                # Strip the leading "vs " for compact bench display
+                                                r_opp_short = r_opp.replace("vs ", "")
+                                                bench_parts.append(
+                                                    f"{r['name']} {r_opp_short} ({r.get('xpts_gw', 0):.1f})"
+                                                )
+                                            bench_names = ", ".join(bench_parts)
                                             st.markdown(
                                                 f"<span style='color:#5a6580;font-size:0.68rem;'>"
                                                 f"{'💪 ' if is_bb else ''}{bench_label} {bench_names}</span>",
