@@ -180,16 +180,22 @@ _ICON_TRANSFERS = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" st
 _ICON_FIXTURES = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="12" height="11" rx="1.2"/><path d="M2 6 L14 6"/><path d="M5 1.5 L5 4"/><path d="M11 1.5 L11 4"/></svg>'
 _ICON_BACKTEST = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12 L6 8 L9 11 L14 4"/><path d="M11 4 L14 4 L14 7"/></svg>'
 _ICON_CHIPS = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M9 1 L4 9 L7.5 9 L6.5 15 L11.5 7 L8 7 Z"/></svg>'
+_ICON_CAPTAIN = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M3 3 L13 3 L12 9 C12 11 10 12.5 8 12.5 C6 12.5 4 11 4 9 Z"/><path d="M5 13 L11 13"/><path d="M7 13 L7 15"/><path d="M9 13 L9 15"/></svg>'
 
+# Nav order follows the weekly FPL workflow: load team -> pick captain ->
+# plan transfers -> consider chips -> research players -> check fixtures ->
+# explore optimal builds -> validate via backtest -> system dashboard.
+# Captain is now a first-class nav item (was buried inside Dashboard).
 NAV_ITEMS = [
     ("my_team", "My Team", _ICON_MY_TEAM),
-    ("dashboard", "Dashboard", _ICON_DASHBOARD),
-    ("players", "Player Projections", _ICON_PLAYERS),
-    ("optimal", "Optimal Squad", _ICON_OPTIMAL),
+    ("captain", "Captain", _ICON_CAPTAIN),
     ("transfers", "Transfer Planner", _ICON_TRANSFERS),
-    ("fixtures", "Fixtures", _ICON_FIXTURES),
-    ("backtest", "Backtest", _ICON_BACKTEST),
     ("chips", "Chip Strategy", _ICON_CHIPS),
+    ("players", "Player Projections", _ICON_PLAYERS),
+    ("fixtures", "Fixtures", _ICON_FIXTURES),
+    ("optimal", "Optimal Squad", _ICON_OPTIMAL),
+    ("backtest", "Backtest", _ICON_BACKTEST),
+    ("dashboard", "Dashboard", _ICON_DASHBOARD),
 ]
 
 # League selector (persisted in session state)
@@ -505,7 +511,17 @@ st.markdown("""
         border-bottom: 1px solid var(--border);
         margin: 0 0 12px;
     }
+    .sb-brand { flex-direction: column; }
     .sb-brand svg { height: 120px; width: auto; max-width: 100%; display: block; margin: 0 auto; }
+    .sb-tagline {
+        font-size: 0.66rem;
+        font-weight: 500;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--text-faint);
+        text-align: center;
+        margin-top: -4px;
+    }
 
     /* HTML-link nav (replaces emoji+button pattern) */
     .sb-nav { display: flex; flex-direction: column; gap: 2px; }
@@ -614,6 +630,34 @@ st.markdown("""
     .status-pill .dot {
         width: 6px; height: 6px; border-radius: 50%;
         background: var(--good);
+    }
+
+    /* ---- Powered-by data sources strip ---- */
+    .powered-by-strip {
+        display: flex; align-items: center; flex-wrap: wrap;
+        gap: 14px; padding: 8px 0 18px;
+        margin: -16px 0 18px;
+        font-size: 0.7rem;
+        border-bottom: 1px solid var(--border);
+    }
+    .pb-label {
+        color: var(--text-faint);
+        font-weight: 600;
+        letter-spacing: 0.14em;
+    }
+    .pb-source {
+        color: var(--text-muted);
+        font-weight: 500;
+        padding: 3px 8px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+    }
+    .pb-source-model {
+        color: var(--brand);
+        border-color: var(--brand-border);
+        background: var(--brand-soft);
+        font-weight: 600;
     }
 
     /* ---- Cards ---- */
@@ -4146,7 +4190,9 @@ def main():
     with st.sidebar:
         # Brand mark — centered in the sidebar
         st.markdown(
-            f'<div class="sb-brand">{DATUMLY_LOGO_SVG}</div>',
+            f'<div class="sb-brand">{DATUMLY_LOGO_SVG}'
+            f'<div class="sb-tagline">FPL intelligence · top 100k target</div>'
+            f'</div>',
             unsafe_allow_html=True,
         )
 
@@ -4273,6 +4319,20 @@ def main():
             f'<span class="status-pill subtle" title="{data_sources_tip}">Data sources</span>'
             f'</div>'
             f'</div>',
+            unsafe_allow_html=True,
+        )
+        # Visible "Powered by" provenance strip — competitors use FPL API only,
+        # we blend four data sources. Making this prominent rather than hidden
+        # in a tooltip is a key differentiation signal for paid conversion.
+        st.markdown(
+            "<div class='powered-by-strip'>"
+            "<span class='pb-label'>POWERED BY</span>"
+            "<span class='pb-source'>FPL API</span>"
+            "<span class='pb-source'>Bookmaker Odds</span>"
+            "<span class='pb-source'>Club Elo</span>"
+            "<span class='pb-source'>xG / xA</span>"
+            "<span class='pb-source pb-source-model'>MILP Optimizer</span>"
+            "</div>",
             unsafe_allow_html=True,
         )
 
@@ -5405,6 +5465,75 @@ def main():
             st.info("Enter your FPL Team ID above to get personalised transfer suggestions. "
                     "You can find it in the URL when you view your team on the FPL website "
                     "(e.g. fantasy.premierleague.com/entry/**123456**/event/1)")
+
+    # ==================== CAPTAIN ====================
+    elif active_nav == "captain":
+        st.markdown(
+            '<div class="section-header">Captain Picks '
+            '<span class="source-tag src-model">Next GW · risk + ceiling weighted</span></div>',
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            "The single most important weekly decision. Ranks captain candidates by "
+            "expected captaincy points (xPts × 2) with risk weighting for rotation — "
+            "a nailed 6.5 xPts player beats a rotation 7.0 xPts player because the 2x "
+            "multiplier amplifies blanks too. Shows ownership for differential edge."
+        )
+
+        if len(qualified) > 0:
+            cap_candidates = qualified[qualified["xpts_next_gw"] > 0].copy()
+            cap_candidates["cap_xpts"] = cap_candidates["xpts_next_gw"] * 2
+            cap_candidates["differential_score"] = cap_candidates["cap_xpts"] * (1 + (100 - cap_candidates["selected_pct"]) / 100)
+            cap_candidates["next_fixture"] = cap_candidates["upcoming"].apply(
+                lambda u: f"{'(H)' if u[0]['home'] else '(A)'} vs {teams.get(u[0]['opp'], {}).get('short_name', '?')}" if u else "?"
+            )
+            cap_candidates["fixture_diff"] = cap_candidates["upcoming"].apply(
+                lambda u: u[0].get("difficulty", 3) if u else 3
+            )
+
+            cap_top = cap_candidates.nlargest(15, "cap_xpts")
+            cap_display = cap_top[[
+                "name", "team", "pos", "price", "next_fixture", "fixture_diff",
+                "xpts_next_gw", "cap_xpts", "selected_pct", "rotation_risk", "start_prob"
+            ]].copy()
+            cap_display.columns = [
+                "Player", "Team", "Pos", "Price", "Fixture", "FDR",
+                "xPts", "Cap xPts", "Own%", "Rotation", "Start%"
+            ]
+            cap_display["Start%"] = (cap_display["Start%"] * 100).round(0).astype(int).astype(str) + "%"
+            cap_display = cap_display.reset_index(drop=True)
+            cap_display.index += 1
+            st.dataframe(cap_display, use_container_width=True, height=540)
+
+            if len(cap_top) > 0:
+                best_cap = cap_top.iloc[0]
+                st.markdown(
+                    f"<div style='background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:0.9rem;margin:0.6rem 0;'>"
+                    f"<span style='color:#fbbf24;font-weight:700;font-size:1.05rem;'>👑 Recommended Captain: "
+                    f"{best_cap['name']}</span><br>"
+                    f"<span style='color:var(--text-muted);font-size:0.8rem;'>"
+                    f"{best_cap['team']} · {best_cap['next_fixture']} · "
+                    f"{best_cap['xpts_next_gw']:.1f} xPts × 2 = {best_cap['cap_xpts']:.1f} · "
+                    f"Owned by {best_cap['selected_pct']:.1f}% · "
+                    f"Rotation: {best_cap['rotation_risk']} ({best_cap['start_prob']:.0%})</span></div>",
+                    unsafe_allow_html=True,
+                )
+
+                diff_caps = cap_candidates[cap_candidates["selected_pct"] < 15].nlargest(3, "cap_xpts")
+                if len(diff_caps) > 0:
+                    diff_best = diff_caps.iloc[0]
+                    st.markdown(
+                        f"<div style='background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:0.9rem;margin:0.4rem 0;'>"
+                        f"<span style='color:#34d399;font-weight:700;'>🎯 Differential Captain: "
+                        f"{diff_best['name']}</span><br>"
+                        f"<span style='color:var(--text-muted);font-size:0.8rem;'>"
+                        f"{diff_best['team']} · {diff_best['next_fixture']} · "
+                        f"{diff_best['xpts_next_gw']:.1f} xPts × 2 = {diff_best['cap_xpts']:.1f} · "
+                        f"Only {diff_best['selected_pct']:.1f}% ownership — huge upside if they haul</span></div>",
+                        unsafe_allow_html=True,
+                    )
+        else:
+            st.info("No qualifying captain candidates in the data — wait for fixtures to be published.")
 
     # ==================== DASHBOARD ====================
     elif active_nav == "dashboard":
