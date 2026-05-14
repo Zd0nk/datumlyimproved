@@ -4240,9 +4240,7 @@ def main():
     with st.sidebar:
         # Brand mark — centered in the sidebar
         st.markdown(
-            f'<div class="sb-brand">{DATUMLY_LOGO_SVG}'
-            f'<div class="sb-tagline">FPL intelligence · top 100k target</div>'
-            f'</div>',
+            f'<div class="sb-brand">{DATUMLY_LOGO_SVG}</div>',
             unsafe_allow_html=True,
         )
 
