@@ -23,6 +23,7 @@ import numpy as np
 import math
 import json
 import re
+import os
 import unicodedata
 from pulp import (
     LpProblem, LpMaximize, LpVariable, lpSum, LpStatus, value,
@@ -1121,6 +1122,264 @@ def load_live_odds():
         return {"fixtures": fixture_odds, "remaining": remaining}, None
     except Exception as e:
         return None, str(e)
+
+
+# ============================================================
+# API-FOOTBALL — Predicted lineups (Source 5)
+# ============================================================
+# Free-tier (100 calls/day) integration to fetch predicted starting XIs.
+# Predicted lineups appear ~6-24 hours before kickoff (post-press-conference);
+# confirmed lineups ~60 mins before. When data is available it overrides the
+# model's backward-looking rotation_factor for those players. When missing or
+# the API fails, falls back silently to the existing rotation model.
+
+API_FOOTBALL_BASE = "https://v3.football.api-sports.io"
+
+# Map API-Football's full team names → FPL short codes. The API uses
+# "Manchester City" / "Brighton & Hove Albion" style names; FPL uses
+# "Man City" / "BHA" / etc. Without this map, lineup data would land on
+# the wrong player IDs (or none).
+API_FOOTBALL_TEAM_MAP_FPL = {
+    "Arsenal": "ARS",
+    "Aston Villa": "AVL",
+    "Bournemouth": "BOU",
+    "AFC Bournemouth": "BOU",
+    "Brentford": "BRE",
+    "Brighton": "BHA",
+    "Brighton & Hove Albion": "BHA",
+    "Chelsea": "CHE",
+    "Crystal Palace": "CRY",
+    "Everton": "EVE",
+    "Fulham": "FUL",
+    "Ipswich": "IPS",
+    "Ipswich Town": "IPS",
+    "Leicester": "LEI",
+    "Leicester City": "LEI",
+    "Liverpool": "LIV",
+    "Manchester City": "MCI",
+    "Man City": "MCI",
+    "Manchester United": "MUN",
+    "Man United": "MUN",
+    "Newcastle": "NEW",
+    "Newcastle United": "NEW",
+    "Nottingham Forest": "NFO",
+    "Southampton": "SOU",
+    "Tottenham": "TOT",
+    "Tottenham Hotspur": "TOT",
+    "West Ham": "WHU",
+    "West Ham United": "WHU",
+    "Wolves": "WOL",
+    "Wolverhampton Wanderers": "WOL",
+    "Leeds": "LEE",
+    "Leeds United": "LEE",
+    "Burnley": "BUR",
+    "Sunderland": "SUN",
+    "Sheffield United": "SHU",
+}
+
+
+def _get_api_football_key():
+    """Return the API-Football key from env var or Streamlit secrets, or None."""
+    key = os.environ.get("API_FOOTBALL_KEY")
+    if key:
+        return key.strip()
+    try:
+        if hasattr(st, "secrets"):
+            key = st.secrets.get("API_FOOTBALL_KEY", None)
+            if key:
+                return str(key).strip()
+    except Exception:
+        pass
+    return None
+
+
+def _normalise_player_name(name):
+    """Lowercase, strip accents, strip punctuation — for name matching."""
+    if not name:
+        return ""
+    n = unicodedata.normalize("NFKD", str(name))
+    n = "".join(c for c in n if not unicodedata.combining(c))
+    n = n.lower()
+    return "".join(c for c in n if c.isalnum() or c.isspace()).strip()
+
+
+@st.cache_data(ttl=14400, show_spinner=False)
+def load_api_football_lineups(gw_planning_id, season_year):
+    """Source 5: API-Football — predicted/confirmed lineups for next N fixtures.
+
+    Returns: (lineups, status, error) where:
+      lineups: dict {team_short: {"starters": [name, ...], "subs": [name, ...]}}
+               OR empty dict if no data
+      status:  str — human-readable status ("12 lineups loaded", "no data yet", etc.)
+      error:   str or None — non-None only when the integration failed entirely
+
+    Free-tier conscious: makes at most ~11 calls per refresh (1 for fixture list,
+    10 for individual lineups). Cached for 4 hours so a normal day uses <30
+    calls even with multiple users.
+    """
+    key = _get_api_football_key()
+    if not key:
+        # No key configured — silent fallback to model defaults
+        return {}, "API key not configured (using model defaults)", None
+
+    headers = {"x-apisports-key": key}
+    league_id = 39  # Premier League
+
+    try:
+        # Step 1: get the next 10 EPL fixtures
+        fixtures_resp = requests.get(
+            f"{API_FOOTBALL_BASE}/fixtures",
+            params={"league": league_id, "season": season_year, "next": 10},
+            headers=headers, timeout=15,
+        )
+        if fixtures_resp.status_code == 401:
+            return {}, "API auth failed (check API_FOOTBALL_KEY)", "auth"
+        if fixtures_resp.status_code == 429:
+            return {}, "API rate-limited (using cached/model defaults)", "rate_limit"
+        if fixtures_resp.status_code != 200:
+            return {}, f"API HTTP {fixtures_resp.status_code}", "http_error"
+
+        data = fixtures_resp.json()
+        fixtures = data.get("response", [])
+        if not fixtures:
+            return {}, "No upcoming fixtures from API", None
+
+        # Step 2: fetch lineup for each fixture
+        lineups_by_team = {}
+        loaded_count = 0
+        for fix in fixtures:
+            fix_id = fix.get("fixture", {}).get("id")
+            if not fix_id:
+                continue
+            try:
+                lu_resp = requests.get(
+                    f"{API_FOOTBALL_BASE}/fixtures/lineups",
+                    params={"fixture": fix_id},
+                    headers=headers, timeout=10,
+                )
+                if lu_resp.status_code != 200:
+                    continue
+                lu_data = lu_resp.json().get("response", [])
+                if not lu_data:
+                    continue  # lineup not yet published for this fixture
+                for team_entry in lu_data:
+                    team_name = team_entry.get("team", {}).get("name", "")
+                    fpl_short = API_FOOTBALL_TEAM_MAP_FPL.get(team_name)
+                    if not fpl_short:
+                        continue
+                    starters = [
+                        p.get("player", {}).get("name", "")
+                        for p in team_entry.get("startXI", [])
+                    ]
+                    subs = [
+                        p.get("player", {}).get("name", "")
+                        for p in team_entry.get("substitutes", [])
+                    ]
+                    lineups_by_team[fpl_short] = {
+                        "starters": [_normalise_player_name(n) for n in starters if n],
+                        "subs": [_normalise_player_name(n) for n in subs if n],
+                    }
+                    loaded_count += 1
+            except Exception:
+                continue  # one bad fixture shouldn't break the whole fetch
+
+        if not lineups_by_team:
+            return {}, "Lineups not yet published (typically appear ~24h before deadline)", None
+        return lineups_by_team, f"{loaded_count} team lineup(s) loaded", None
+
+    except requests.Timeout:
+        return {}, "API timed out (using model defaults)", "timeout"
+    except Exception as e:
+        return {}, f"API error: {type(e).__name__}", "exception"
+
+
+def apply_predicted_lineups(df, xpts_map, lineups, gw_id):
+    """Apply API-Football predicted lineups as a start_prob override for the
+    target GW. Predicted starters get start_prob = 0.95 (with capped scaling);
+    predicted non-starters who ARE in the squad pool get start_prob = 0.10.
+
+    Players that the API didn't mention (e.g., unrecognised name, missing
+    team, mid-table rotation) keep their model-default projection.
+
+    Manual user lineup_overrides applied AFTER this function will still trump
+    the API's predictions — research-driven user input is highest-confidence.
+
+    Returns (df_adj, xpts_map_adj) — fresh copies.
+    """
+    if not lineups:
+        return df, xpts_map
+
+    df_adj = df.copy()
+    xpts_map_adj = {pid: dict(gws) for pid, gws in xpts_map.items()}
+
+    # Build a lookup: (team_short, normalised_name) → pid. We try multiple
+    # name forms (web_name / full name / first_initial+second_name) because
+    # API-Football's naming is inconsistent ("B. Saka" vs "Bukayo Saka").
+    lookup = {}
+    for _, row in df_adj.iterrows():
+        team_short = str(row.get("team", "")).strip()
+        if not team_short:
+            continue
+        pid = int(row["id"])
+        candidates = []
+        web = str(row.get("name", ""))
+        first = str(row.get("first_name", ""))
+        second = str(row.get("second_name", ""))
+        if web:
+            candidates.append(web)
+        if first and second:
+            candidates.append(f"{first} {second}")
+        if first and second:
+            candidates.append(f"{first[0]}. {second}")
+        if second:
+            candidates.append(second)
+        for cand in candidates:
+            norm = _normalise_player_name(cand)
+            if norm:
+                lookup[(team_short, norm)] = pid
+
+    matched_starters = set()
+    matched_non_starters = set()
+
+    for team_short, lu in lineups.items():
+        starter_names = lu.get("starters", []) or []
+        sub_names = lu.get("subs", []) or []
+
+        for nm in starter_names:
+            pid = lookup.get((team_short, nm))
+            if pid:
+                matched_starters.add(pid)
+
+        for nm in sub_names:
+            pid = lookup.get((team_short, nm))
+            if pid:
+                matched_non_starters.add(pid)
+
+    # Apply scaling. Use the same approach as apply_lineup_overrides but with
+    # API-derived status. Cap the scale to avoid blowing up players the model
+    # already projected near-zero.
+    def _scale_player(pid, target_sp):
+        rows = df_adj[df_adj["id"] == pid]
+        if len(rows) == 0:
+            return
+        idx = rows.index[0]
+        original_sp = float(df_adj.at[idx, "start_prob"] or 0) if "start_prob" in df_adj.columns else 0.85
+        original_sp = max(original_sp, 0.05)
+        scale = min(target_sp / original_sp, 2.5) if target_sp > 0 else 0.0
+        # Only apply to the target GW (lineup data is GW-specific)
+        if pid in xpts_map_adj and gw_id in xpts_map_adj[pid]:
+            xpts_map_adj[pid][gw_id] = xpts_map_adj[pid][gw_id] * scale
+        # And surface the change on the dataframe so My Team pitch reflects it
+        if "xpts_next_gw" in df_adj.columns:
+            df_adj.at[idx, "xpts_next_gw"] = float(df_adj.at[idx, "xpts_next_gw"]) * scale
+
+    for pid in matched_starters:
+        _scale_player(pid, target_sp=0.95)
+    for pid in matched_non_starters - matched_starters:
+        _scale_player(pid, target_sp=0.10)
+
+    return df_adj, xpts_map_adj
+
 
 @st.cache_data(ttl=3600)
 def load_recent_gw_live_data(current_gw_id, n_recent=7):
@@ -4336,11 +4595,23 @@ def main():
     # window is shown. Floors at 1 to keep loops well-defined on the final GW.
     n_planning_gws = max(1, min(6, LC["season_gws"] - planning_gw_id + 1))
 
-    # Apply user lineup overrides globally — overrides are set in the My Team
-    # tab and propagate to ALL tabs (planner, captain, optimal squad, etc.)
-    # so the user's predicted-lineup intel actually feeds into every decision.
-    # The override applies to the next GW specifically (since press-conference
-    # info is GW-specific), not the whole horizon.
+    # Layer 1: API-Football predicted lineups (when available, typically the
+    # day before deadline). Lifts confirmed starters' play probability to 0.95
+    # and dampens non-starters in squad pool to 0.10. Silent fallback to
+    # model-defaults if API key missing, API down, or lineups not yet
+    # published.
+    _season_year = LC["season_gws"]  # NOTE: actually want season starting year — derive below
+    # FPL season starts in August. If current month >= 8, season year = current year; else previous.
+    _now = datetime.now()
+    _season_year = _now.year if _now.month >= 8 else _now.year - 1
+    api_lineups, api_status, api_error = load_api_football_lineups(planning_gw_id, _season_year)
+    if api_lineups:
+        df, xpts_map = apply_predicted_lineups(df, xpts_map, api_lineups, planning_gw_id)
+    # Stash status for the UI indicator
+    st.session_state["_api_lineups_status"] = api_status
+
+    # Layer 2: User manual lineup overrides — applied AFTER API so user
+    # research always trumps automated predictions. Set in the My Team tab.
     _lineup_overrides = st.session_state.get("lineup_overrides", {})
     if _lineup_overrides:
         df, xpts_map = apply_lineup_overrides(df, xpts_map, _lineup_overrides, gw_id=planning_gw_id)
@@ -4370,17 +4641,24 @@ def main():
             unsafe_allow_html=True,
         )
         # Visible "Powered by" provenance strip — competitors use FPL API only,
-        # we blend four data sources. Making this prominent rather than hidden
+        # we blend five data sources. Making this prominent rather than hidden
         # in a tooltip is a key differentiation signal for paid conversion.
+        _api_lu_status = st.session_state.get("_api_lineups_status", "")
+        # The Predicted Lineups pill colour depends on data freshness:
+        # active (lineups loaded) → brand-soft tint; empty/inactive → muted.
+        _lineups_class = "pb-source pb-source-model" if "loaded" in (_api_lu_status or "").lower() else "pb-source"
+        _lineups_label = "Predicted Lineups ✓" if "loaded" in (_api_lu_status or "").lower() else "Predicted Lineups"
+        _lineups_title = _api_lu_status.replace('"', "'") if _api_lu_status else "API-Football integration"
         st.markdown(
-            "<div class='powered-by-strip'>"
-            "<span class='pb-label'>POWERED BY</span>"
-            "<span class='pb-source'>FPL API</span>"
-            "<span class='pb-source'>Bookmaker Odds</span>"
-            "<span class='pb-source'>Club Elo</span>"
-            "<span class='pb-source'>xG / xA</span>"
-            "<span class='pb-source pb-source-model'>MILP Optimizer</span>"
-            "</div>",
+            f"<div class='powered-by-strip'>"
+            f"<span class='pb-label'>POWERED BY</span>"
+            f"<span class='pb-source'>FPL API</span>"
+            f"<span class='pb-source'>Bookmaker Odds</span>"
+            f"<span class='pb-source'>Club Elo</span>"
+            f"<span class='pb-source'>xG / xA</span>"
+            f"<span class='{_lineups_class}' title='{_lineups_title}'>{_lineups_label}</span>"
+            f"<span class='pb-source pb-source-model'>MILP Optimizer</span>"
+            f"</div>",
             unsafe_allow_html=True,
         )
 
